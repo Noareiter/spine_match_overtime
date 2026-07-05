@@ -1,0 +1,42 @@
+{
+  "animal_id": "DEMO10",
+  "fov": "1",
+  "timepoint_names": [
+    "pre-droplet",
+    "end-droplet",
+    "end-lever"
+  ],
+  "updated_at": "2026-06-30T09:41:26.210396+00:00",
+  "links": [
+    {
+      "link_id": "link_dendrite_1",
+      "members": {
+        "pre-droplet": [
+          "1"
+        ],
+        "end-droplet": [
+          "1"
+        ],
+        "end-lever": [
+          "1"
+        ]
+      },
+      "notes": "Demo dendrite 1 (spines 1-5)"
+    },
+    {
+      "link_id": "link_dendrite_2",
+      "members": {
+        "pre-droplet": [
+          "2"
+        ],
+        "end-droplet": [
+          "2"
+        ],
+        "end-lever": [
+          "2"
+        ]
+      },
+      "notes": "Demo dendrite 2 (spines 6-10)"
+    }
+  ]
+}

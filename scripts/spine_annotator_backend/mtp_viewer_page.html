@@ -1,0 +1,2582 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Longitudinal spine tracker — 5×2</title>
+<style>
+  :root { --bg:#f4f6f9; --panel:#fff; --ink:#1b1f24; --muted:#697077; --line:#dfe3ea; --blue:#2563eb; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; background:var(--bg); color:var(--ink); font-size:13px; }
+  header { padding:10px 16px; background:var(--panel); border-bottom:1px solid var(--line); display:flex; gap:10px; align-items:center; flex-wrap:wrap; position:sticky; top:0; z-index:10; }
+  header h1 { font-size:15px; margin:0; font-weight:600; }
+  header .sub { color:var(--muted); font-size:12px; }
+  button, select, input[type=number] { font:inherit; font-size:12px; padding:6px 10px; border-radius:7px; border:1px solid var(--line); background:#fff; }
+  button.primary { background:var(--blue); color:#fff; border-color:var(--blue); cursor:pointer; }
+  button.finish { background:#059669; color:#fff; border-color:#059669; font-weight:600; }
+  .complete-banner { display:none; margin-bottom:12px; padding:14px 16px; background:#ecfdf5; border:1px solid #6ee7b7; border-radius:10px; }
+  .complete-banner.open { display:block; }
+  .complete-banner h2 { margin:0 0 6px; font-size:15px; color:#047857; }
+  .complete-banner p { margin:0; font-size:12px; color:#065f46; }
+  button.active-oof { background:#f97316; color:#fff; border-color:#f97316; }
+  button.active-add { background:#0891b2; color:#fff; border-color:#0891b2; }
+  button.active-tp-mode { background:#7c3aed; color:#fff; border-color:#7c3aed; font-weight:600; }
+  button { cursor:pointer; }
+  .wrap { padding:12px 16px 28px; }
+  .status { color:var(--muted); font-size:12px; margin-bottom:10px; min-height:18px; }
+  .grid5 { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:8px; }
+  @media (max-width:1200px){ .grid5 { grid-template-columns:repeat(2,1fr); } }
+  .col { display:flex; flex-direction:column; gap:4px; min-width:0; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+  .ph { padding:7px 9px; border-bottom:1px solid var(--line); font-size:11px; }
+  .ph .tp { font-weight:600; font-size:12px; }
+  .ph .meta { color:var(--muted); margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .disp { display:flex; gap:6px; align-items:center; padding:4px 8px; font-size:10px; color:var(--muted); background:#fafbfc; border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  .disp label { display:flex; align-items:center; gap:4px; }
+  .disp input[type=range] { width:72px; }
+  .row-label { font-size:10px; text-transform:uppercase; letter-spacing:.5px; color:var(--muted); padding:0 2px 4px; }
+  canvas { width:100%; display:block; background:#000; }
+  canvas.pan { cursor:grab; touch-action:none; }
+  canvas.pan.dragging { cursor:grabbing; }
+  .fate-bar { padding:6px 8px; font-size:11px; border-top:1px solid var(--line); background:#fafbfc; display:flex; flex-direction:column; gap:4px; }
+  .fate-bar select { width:100%; }
+  .fate-bar.locked select { opacity:.45; pointer-events:none; }
+  .fate-bar .sid { font-weight:600; }
+  .fate-bar .fate-tag { color:#7c3aed; font-weight:600; }
+  .fate-bar .fate-tag.blind { color:#b45309; }
+  .fate-bar .fate-tag.fp { color:#be123c; }
+  .fate-bar .fp-btn { font-size:10px; padding:3px 6px; margin-right:4px; }
+  .oof-modal-backdrop { display:none; position:fixed; inset:0; background:rgba(15,23,42,.45); z-index:1000; align-items:center; justify-content:center; }
+  .oof-modal-backdrop.open { display:flex; }
+  .oof-modal { background:#fff; border-radius:12px; padding:18px 20px; max-width:420px; width:92%; box-shadow:0 12px 40px rgba(0,0,0,.18); }
+  .oof-modal h3 { margin:0 0 8px; font-size:15px; }
+  .oof-modal p { margin:0 0 12px; font-size:12px; color:var(--muted); }
+  .oof-tp-list { display:flex; flex-direction:column; gap:6px; margin:12px 0; max-height:220px; overflow:auto; }
+  .oof-tp-list label { display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer; }
+  .oof-modal-actions { display:flex; gap:8px; flex-wrap:wrap; margin-top:14px; }
+  .oof-modal-actions button { font:inherit; padding:6px 12px; border-radius:8px; border:1px solid var(--line); background:#fff; cursor:pointer; }
+  .oof-modal-actions button.primary { background:var(--blue); color:#fff; border-color:var(--blue); }
+  .oof-modal-actions button.danger { background:#dc2626; color:#fff; border-color:#dc2626; }
+  .oof-seg-list { display:flex; flex-direction:column; gap:8px; margin:12px 0; max-height:280px; overflow:auto; }
+  .oof-seg-item { display:flex; align-items:center; gap:10px; padding:8px 10px; border:1px solid var(--line); border-radius:8px; font-size:12px; }
+  .oof-seg-item .oof-seg-meta { flex:1; min-width:0; }
+  .oof-seg-item .oof-seg-id { font-weight:600; font-size:11px; color:var(--muted); }
+  .oof-seg-item .oof-seg-desc { margin-top:2px; }
+  .oof-seg-empty { font-size:12px; color:var(--muted); padding:8px 0; }
+  .legend { margin-top:10px; font-size:11px; color:var(--muted); }
+  .col.tp-active-timepoint .panel { border-color:#2563eb; box-shadow:0 0 0 2px rgba(37,99,235,.2); }
+  body.timepoint-review-mode .col.tp-active-timepoint .fate-bar { background:#eff6ff; }
+  #modeBadge { font-size:11px; font-weight:600; padding:3px 8px; border-radius:6px; background:#e0e7ff; color:#3730a3; }
+  body.timepoint-review-mode #modeBadge { background:#ede9fe; color:#5b21b6; }
+  a { color:var(--blue); text-decoration:none; font-size:12px; }
+  .cross-mode header, .cross-mode .status { background:#fff7ed; }
+  .fov-zoom button { font-size:10px; padding:2px 6px; margin-left:2px; }
+  .conflict-bar { display:none; margin:10px 0; padding:10px 12px; background:#fff7ed; border:1px solid #fdba74; border-radius:10px; }
+  .conflict-bar.open { display:block; }
+  .conflict-bar h3 { margin:0 0 8px; font-size:13px; color:#9a3412; }
+  .conflict-actions { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  .conflict-actions button.keep-a { background:#2563eb; color:#fff; border-color:#2563eb; }
+  .conflict-actions button.keep-b { background:#dc2626; color:#fff; border-color:#dc2626; }
+  .conflict-actions button.edit-row { font-weight:600; }
+  .conflict-actions button.edit-row.active-a { background:#2563eb; color:#fff; border-color:#2563eb; }
+  .conflict-actions button.edit-row.active-b { background:#dc2626; color:#fff; border-color:#dc2626; }
+  .fate-bar.fate-row-focus { outline:2px solid #f59e0b; outline-offset:1px; }
+  body.conflict-mode #zoomRow .row-wrap { border:2px solid transparent; border-radius:10px; padding:2px; cursor:pointer; }
+  body.conflict-mode #fovRow .row-wrap { border:2px solid transparent; border-radius:10px; padding:2px; cursor:pointer; }
+  body.conflict-mode #zoomRow .row-wrap.focus-a { border-color:#2563eb; box-shadow:0 0 0 2px rgba(37,99,235,.15); }
+  body.conflict-mode #fovRow .row-wrap.focus-b { border-color:#dc2626; box-shadow:0 0 0 2px rgba(220,38,38,.15); }
+  body.conflict-mode .col.conflict-tp .panel { border-color:#f59e0b; box-shadow:0 0 0 2px rgba(245,158,11,.25); }
+  .row-wrap { width:100%; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Longitudinal spine tracker</h1>
+  <span class="sub">pre→mid score · per-panel contrast · fate labels</span>
+  <span id="modeBadge"></span>
+  <button id="reviewModeBtn" type="button" onclick="toggleReviewMode()" title="Shortcut: S">Lineage mode (S)</button>
+  <label>FOV <input id="fov" type="number" min="1" max="20" value="1" style="width:52px"/></label>
+  <button class="primary" onclick="loadAnimal()">Load animal</button>
+  <button onclick="prevSpine()">← Prev</button>
+  <button id="undoBtn" onclick="undoLastChoice()" disabled title="Undo last change on this spine">Undo</button>
+  <button id="nextBtn" class="primary" onclick="nextSpine()">Save &amp; next →</button>
+  <select id="spinePick" onchange="jumpSpine()" style="min-width:220px"></select>
+  <span id="spineIdx" style="font-size:12px;color:var(--muted)"></span>
+  <button id="crossBtn" onclick="toggleCrossMode()" style="display:none">Cross-dendrite review</button>
+  <button id="oofBtn" onclick="toggleOofMode()">Mark OOF segment</button>
+  <button id="oofRemoveBtn" onclick="openOofRemoveModal()">Remove OOF segment</button>
+  <label id="oofPropLabel" style="display:none;font-size:11px;gap:4px;align-items:center">
+    <input type="checkbox" id="oofPropCheck" onchange="S.oofPropagateShift=this.checked"/> move all TPs together
+  </label>
+  <span id="oofHint" style="display:none;font-size:11px;color:#c2410c">Draw on zoom or FOV · Shift=box · drag region=move · corners=resize · Alt+drag=pan</span>
+  <button id="addSpineBtn" onclick="toggleAddSpineMode()">Force add spine</button>
+  <button id="clearAllBtn" onclick="clearAllTps()" title="Clear match on every timepoint (no fate) · Tab">Clear all</button>
+  <span id="scoreBadge" style="font-size:12px;color:#0f766e;font-weight:600"></span>
+  <span id="regBadge" style="font-size:12px;color:#7c3aed;font-weight:600;display:none"></span>
+  <span id="linkBadge" style="font-size:12px;color:var(--muted);display:none"></span>
+  <a href="/mtp/" style="margin-left:auto;font-size:12px;">← Dendrite links</a>
+</header>
+<div id="outputPathBar" style="padding:4px 14px;font-size:11px;color:var(--muted);background:#fffbeb;border-bottom:1px solid #fde68a;">
+  <strong>Output CSV:</strong> <span id="outputPath" title="Updated on Save &amp; next only">(click Load animal)</span>
+  <span style="margin-left:12px;color:#92400e">S-mode A/I/N/L and Tab do not write the CSV — press <strong>Save &amp; next →</strong></span>
+</div>
+<div id="tpPick" style="padding:6px 14px;font-size:11px;color:var(--muted);background:#f8fafc;border-bottom:1px solid var(--line);"></div>
+<div class="wrap">
+  <div class="complete-banner" id="completeBanner">
+    <h2>Review complete</h2>
+    <p id="completeBannerText">All spines reviewed. Registry CSV updated in the annotator folder.</p>
+    <p style="margin-top:8px;font-size:12px;color:var(--muted)">To change a decision: pick a spine in the dropdown above, edit, then click <strong>Save changes →</strong>.</p>
+    <button type="button" class="primary" style="margin-top:10px" onclick="resumeEditing()">Edit spines</button>
+  </div>
+  <div class="status" id="status">Load a FOV to begin.</div>
+  <div class="conflict-bar" id="conflictBar">
+    <h3 id="conflictTitle">Duplicate conflict</h3>
+    <div class="conflict-actions">
+      <button type="button" id="editRowA" class="edit-row" onclick="setConflictFocus('a')">Edit row A</button>
+      <button type="button" id="editRowB" class="edit-row" onclick="setConflictFocus('b')">Edit row B</button>
+      <button type="button" onclick="saveConflictEdits('a')">Save row A edits</button>
+      <button type="button" onclick="saveConflictEdits('b')">Save row B edits</button>
+      <button type="button" class="keep-a" onclick="resolveConflict('a')">Keep lineage A (finish)</button>
+      <button type="button" class="keep-b" onclick="resolveConflict('b')">Keep lineage B (finish)</button>
+      <span id="conflictHint" style="font-size:11px;color:var(--muted)">Pick Edit A or B (or click a row). Each row: click spines to match · Clear · False+ on fate bar below that row.</span>
+    </div>
+  </div>
+  <div class="row-label" id="topRowLabel">Top — zoom-in (click label = select · Force add ON = click to add spine)</div>
+  <div class="row-wrap" id="topRowWrap"><div class="grid5" id="zoomRow"></div></div>
+  <div class="row-label" id="bottomRowLabel" style="margin-top:12px">Bottom — full FOV (wheel = zoom · Shift+wheel = Z · Fit = whole image)</div>
+  <div class="row-wrap" id="bottomRowWrap"><div class="grid5" id="fovRow"></div></div>
+  <div class="legend">Lineage: Tab = clear all · I = ignore all TPs · Save = infer new/lost. Timepoint (S): Tab = clear anchor only · A/I/N/L = anchor only · Save &amp; next when done.</div>
+</div>
+<div class="oof-modal-backdrop" id="oofModalBackdrop">
+  <div class="oof-modal" onclick="event.stopPropagation()">
+    <h3>Apply OOF region</h3>
+    <p id="oofModalHint">Choose timepoints. Spines inside the shape are ignored (hidden from matching queue).</p>
+    <div class="oof-tp-list" id="oofTpList"></div>
+    <div class="oof-modal-actions">
+      <button type="button" onclick="oofSelectAllTps(true)">All timepoints</button>
+      <button type="button" onclick="oofSelectAllTps(false)">Clear</button>
+      <button type="button" class="primary" onclick="confirmOofApply()">Apply</button>
+      <button type="button" onclick="cancelOofModal()">Cancel</button>
+    </div>
+  </div>
+</div>
+<div class="oof-modal-backdrop" id="oofRemoveBackdrop">
+  <div class="oof-modal" onclick="event.stopPropagation()">
+    <h3>Remove OOF segment</h3>
+    <p>Delete a region to restore spines in the matching queue (unless still inside another OOF region).</p>
+    <div class="oof-seg-list" id="oofSegList"></div>
+    <div class="oof-modal-actions">
+      <button type="button" onclick="closeOofRemoveModal()">Close</button>
+    </div>
+  </div>
+</div>
+<script>
+const S = {
+  timepoints: [], t1SpineIds: [], queueMeta: {}, idx: 0, positions: {},
+  fovCenter: {}, zoomCenter: {}, fovZ: {}, fovZMax: {}, fovSpan: {}, zoomSizeA: {}, zoomSizeB: {},
+  drag: null, oofDrag: null, oofStroke: null, oofPreview: null, oofEdit: null, oofPropagateShift: false, queueMode: 'main', crossCount: 0,
+  globalMode: true, oofMode: false, addSpineMode: false, oofSegments: [],
+  display: {}, panelCache: {},
+  phaseIndex: 0, phaseCount: 0, anchorTp: '',
+  phaseKind: 'lineage',
+  positionsB: {}, lineageAKey: '', lineageBKey: '', conflict: {}, conflictTp: '', conflictFocus: 'a',
+  coverage: {},
+  reviewMode: 'lineage',
+  pendingOof: null, reviewComplete: false, undoSnapshot: null, fateBusy: false,
+};
+
+function stripPositionSnapshot(positions) {
+  const out = {};
+  for (const tp of S.timepoints) {
+    const p = (positions && positions[tp]) || {};
+    out[tp] = {
+      spine_id: p.spine_id ?? null,
+      x: p.x, y: p.y, z: p.z,
+      dendrite_id: p.dendrite_id ?? null,
+      source: p.source ?? null,
+      fate: p.fate ?? null,
+      decision_scope: p.decision_scope ?? null,
+      artifact_mode: p.artifact_mode ?? null,
+      removed_spine_id: p.removed_spine_id ?? null,
+      continuity: p.continuity ?? null,
+    };
+  }
+  return out;
+}
+
+function pushUndo() {
+  if (!S.positions || !Object.keys(S.positions).length) return;
+  S.undoSnapshot = stripPositionSnapshot(S.positions);
+  updateUndoBtn();
+}
+
+function clearUndo() {
+  S.undoSnapshot = null;
+  updateUndoBtn();
+}
+
+function updateUndoBtn() {
+  const btn = document.getElementById('undoBtn');
+  if (btn) btn.disabled = !S.undoSnapshot;
+}
+
+function applyPositionsFromServer(positions) {
+  S.positions = positions;
+  S.timepoints.forEach(tp => {
+    const p = positions[tp];
+    if (p && p.x != null && p.y != null) {
+      S.fovCenter[tp] = { x: p.x, y: p.y };
+      S.zoomCenter[tp] = { x: p.x, y: p.y };
+    }
+    if (p && p.z != null) S.fovZ[tp] = Math.round(p.z);
+  });
+}
+
+async function undoLastChoice() {
+  if (!S.undoSnapshot) return;
+  const snap = S.undoSnapshot;
+  S.undoSnapshot = null;
+  updateUndoBtn();
+  try {
+    const res = await api('/mtp/viewer/undo-positions', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ positions: snap })
+    });
+    applyPositionsFromServer(res.positions);
+    document.getElementById('status').textContent = res.message || 'Undid last change.';
+    updateHeaders(); updateFateBars();
+    await refreshAll();
+  } catch(err) {
+    S.undoSnapshot = snap;
+    updateUndoBtn();
+    document.getElementById('status').textContent = String(err.message || err);
+  }
+}
+
+function updatePhaseBadge() {
+  const el = document.getElementById('modeBadge');
+  if (!el) return;
+  const phase = S.phaseCount > 0
+    ? `Phase ${S.phaseIndex + 1}/${S.phaseCount}: ${S.anchorTp || S.timepoints[0] || ''}`
+    : '';
+  if (S.reviewMode === 'timepoint') {
+    el.textContent = phase
+      ? `${phase} · TIMEPOINT (A/I/N/L)`
+      : 'TIMEPOINT mode (A/I/N/L)';
+  } else if (S.phaseKind === 'duplicate') {
+    const cov = S.coverage || {};
+    const covTxt = cov.catalog_total ? ` · ${cov.tagged || 0}/${cov.catalog_total} tagged` : '';
+    el.textContent = phase ? `${phase} · CONFLICTS${covTxt}` : `CONFLICTS${covTxt}`;
+  } else if (S.phaseKind === 'unreviewed') {
+    const cov = S.coverage || {};
+    const covTxt = cov.catalog_total ? ` · ${cov.unreviewed || 0} left` : '';
+    el.textContent = phase ? `${phase} · UNREVIEWED (final sweep)${covTxt}` : `UNREVIEWED (final sweep)${covTxt}`;
+  } else {
+    el.textContent = phase ? `${phase} · LINEAGE` : 'LINEAGE mode';
+  }
+  document.body.classList.toggle('timepoint-review-mode', S.reviewMode === 'timepoint');
+  const btn = document.getElementById('reviewModeBtn');
+  if (btn) {
+    const tp = S.anchorTp || S.timepoints[0] || '';
+    if (S.reviewMode === 'timepoint') {
+      btn.textContent = `Timepoint: ${tp} (S)`;
+      btn.classList.add('active-tp-mode');
+      btn.title = 'Timepoint mode · A/I/N/L on anchor · Press S for lineage mode';
+    } else {
+      btn.textContent = 'Lineage mode (S)';
+      btn.classList.remove('active-tp-mode');
+      btn.title = 'Lineage mode · Clear → infer on save · Press S for timepoint mode';
+    }
+  }
+  updateConflictUi();
+  highlightActiveTimepointColumn();
+  updateNavButtons();
+}
+
+function highlightActiveTimepointColumn() {
+  const active = S.reviewMode === 'timepoint' ? (S.anchorTp || '') : '';
+  const conflictTp = S.phaseKind === 'duplicate' ? (S.conflictTp || '') : '';
+  document.querySelectorAll('#zoomRow .col, #fovRow .col').forEach(col => {
+    col.classList.remove('tp-active-timepoint', 'conflict-tp');
+  });
+  S.timepoints.forEach((tp, i) => {
+    const zCol = document.querySelector('#zoomRow .col:nth-child(' + (i + 1) + ')');
+    const fCol = document.querySelector('#fovRow .col:nth-child(' + (i + 1) + ')');
+    if (active && tp === active) {
+      if (zCol) zCol.classList.add('tp-active-timepoint');
+      if (fCol) fCol.classList.add('tp-active-timepoint');
+    }
+    if (conflictTp && tp === conflictTp) {
+      if (zCol) zCol.classList.add('conflict-tp');
+      if (fCol) fCol.classList.add('conflict-tp');
+    }
+  });
+}
+
+function updateConflictUi() {
+  const on = S.phaseKind === 'duplicate';
+  document.body.classList.toggle('conflict-mode', on);
+  const bar = document.getElementById('conflictBar');
+  const topLbl = document.getElementById('topRowLabel');
+  const botLbl = document.getElementById('bottomRowLabel');
+  const topWrap = document.getElementById('topRowWrap');
+  const botWrap = document.getElementById('bottomRowWrap');
+  if (bar) bar.classList.toggle('open', on);
+  if (on) {
+    if (topLbl) topLbl.textContent = `Top — Lineage A (${S.lineageAKey || '?'}) · click image to match · fate bar below each column`;
+    if (botLbl) botLbl.textContent = `Bottom — Lineage B (${S.lineageBKey || '?'}) · click image to match · fate bar below each column`;
+    const title = document.getElementById('conflictTitle');
+    if (title) {
+      const parts = (S.t1SpineIds[S.idx] || '').split('|');
+      const dupTp = parts[0] || (S.conflict && S.conflict.timepoint) || '';
+      const compTp = S.conflictTp || dupTp;
+      const sid = parts[1] || (S.conflict && S.conflict.spine_id) || '';
+      title.textContent = sid
+        ? (dupTp && dupTp !== compTp
+          ? `Duplicate ${sid} @ ${dupTp} · compare at ${compTp} · A=${S.lineageAKey} vs B=${S.lineageBKey}`
+          : `Duplicate ${sid} @ ${compTp} · A=${S.lineageAKey} vs B=${S.lineageBKey}`)
+        : `Conflict · A=${S.lineageAKey} vs B=${S.lineageBKey}`;
+    }
+    if (topWrap) topWrap.classList.toggle('focus-a', S.conflictFocus === 'a');
+    if (botWrap) botWrap.classList.toggle('focus-b', S.conflictFocus === 'b');
+    const btnA = document.getElementById('editRowA');
+    const btnB = document.getElementById('editRowB');
+    if (btnA) {
+      btnA.classList.toggle('active-a', S.conflictFocus === 'a');
+      btnA.textContent = `Edit row A${S.lineageAKey ? ' ('+S.lineageAKey+')' : ''}`;
+    }
+    if (btnB) {
+      btnB.classList.toggle('active-b', S.conflictFocus === 'b');
+      btnB.textContent = `Edit row B${S.lineageBKey ? ' ('+S.lineageBKey+')' : ''}`;
+    }
+  } else {
+    if (topLbl) topLbl.textContent = 'Top — zoom-in (click label = select · Force add ON = click to add spine)';
+    if (botLbl) botLbl.textContent = 'Bottom — full FOV (wheel = zoom · Shift+wheel = Z · Fit = whole image)';
+    if (topWrap) topWrap.classList.remove('focus-a');
+    if (botWrap) botWrap.classList.remove('focus-b');
+  }
+}
+
+function setConflictFocus(row) {
+  S.conflictFocus = row === 'b' ? 'b' : 'a';
+  updateConflictUi();
+  updateFateBars();
+  updateNavButtons();
+  api('/mtp/viewer/conflict-focus', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ row: S.conflictFocus })
+  }).catch(() => {});
+}
+
+function bindConflictRowClicks() {
+  const top = document.getElementById('topRowWrap');
+  const bot = document.getElementById('bottomRowWrap');
+  if (top && !top._conflictBound) {
+    top._conflictBound = true;
+    top.addEventListener('click', () => { if (S.phaseKind === 'duplicate') setConflictFocus('a'); });
+  }
+  if (bot && !bot._conflictBound) {
+    bot._conflictBound = true;
+    bot.addEventListener('click', () => { if (S.phaseKind === 'duplicate') setConflictFocus('b'); });
+  }
+}
+
+function updateNavButtons(reviewComplete) {
+  const btn = document.getElementById('nextBtn');
+  if (!btn) return;
+  btn.disabled = !S.t1SpineIds.length;
+  if (reviewComplete || S.reviewComplete) {
+    btn.textContent = 'Save changes →';
+    btn.className = 'primary';
+    return;
+  }
+  if (S.phaseKind === 'duplicate') {
+    btn.textContent = S.conflictFocus === 'b' ? 'Save row B edits →' : 'Save row A edits →';
+    btn.className = 'primary';
+    btn.disabled = false;
+    return;
+  }
+  btn.disabled = !S.t1SpineIds.length;
+  const lastSpine = S.t1SpineIds.length > 0 && S.idx >= S.t1SpineIds.length - 1;
+  const lastPhase = S.phaseCount > 0 && S.phaseIndex >= S.phaseCount - 1;
+  if (lastSpine && lastPhase) {
+    btn.textContent = 'Finish review ✓';
+    btn.className = 'primary finish';
+  } else if (lastSpine) {
+    btn.textContent = 'Finish phase →';
+    btn.className = 'primary';
+  } else {
+    btn.textContent = 'Save & next →';
+    btn.className = 'primary';
+  }
+}
+
+function resumeEditing() {
+  S.reviewComplete = false;
+  const banner = document.getElementById('completeBanner');
+  if (banner) banner.classList.remove('open');
+  updateNavButtons(false);
+  if (S.t1SpineIds.length) {
+    document.getElementById('status').textContent =
+      'Pick a spine, edit, then Save changes → to update the CSV (close Excel first).';
+    selectSpineAt(S.idx >= 0 ? S.idx : 0);
+  }
+}
+
+function formatFileTime(iso) {
+  if (!iso) return '';
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return iso;
+    return d.toLocaleString();
+  } catch (_) {
+    return iso;
+  }
+}
+
+function expectedRegistryPath(load) {
+  if (load && load.registry_path) return load.registry_path;
+  const root = load && load.respan_root;
+  const fov = parseInt(document.getElementById('fov').value || '1', 10);
+  if (root) return root.replace(/\\/g, '/') + '/_annotator/fov' + fov + '/spine_registry_wide.csv';
+  return '';
+}
+
+function updateOutputPath(path, mtime) {
+  const el = document.getElementById('outputPath');
+  if (!el) return;
+  const when = formatFileTime(mtime);
+  el.textContent = path ? (path + (when ? ` · last saved ${when}` : '')) : '(path unknown)';
+  el.title = path ? 'Close CSV in Excel and reopen after each save to see updates' : '';
+}
+
+function formatSaveStatus(res) {
+  const parts = [];
+  if (res && res.message) parts.push(res.message);
+  else if (res && res.pre_spine_id) parts.push('Saved ' + res.pre_spine_id);
+  if (res && res.inference_message) parts.push(res.inference_message);
+  if (res && res.registry_path) {
+    const when = formatFileTime(res.registry_mtime);
+    parts.push('CSV: ' + res.registry_path + (when ? ` (${when})` : ''));
+  }
+  return parts.join(' · ') || 'Saved.';
+}
+
+function showReviewComplete(res) {
+  S.reviewComplete = true;
+  if (res && res.registry_path) updateOutputPath(res.registry_path, res.registry_mtime);
+  const banner = document.getElementById('completeBanner');
+  const text = document.getElementById('completeBannerText');
+  if (banner) {
+    banner.classList.add('open');
+    banner.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+  if (text) {
+    const when = formatFileTime(res && res.registry_mtime);
+    const extra = res && res.registry_path
+      ? ' File: ' + res.registry_path + (when ? ' (' + when + ')' : '')
+      : '';
+    text.textContent = (res && res.message) || ('All spines reviewed.' + extra);
+  }
+  document.getElementById('status').textContent =
+    (res && res.message) || 'Review complete — registry saved.';
+  updateNavButtons(true);
+}
+
+function maybeShowAlreadyComplete(load) {
+  const reviewed = (load.review_progress && load.review_progress.reviewed_ids) || [];
+  const lastPhase = (load.phase_count || 0) > 0 && (load.phase_index || 0) >= (load.phase_count || 1) - 1;
+  const queueEmpty = !S.t1SpineIds.length;
+  const pendingUnreviewed = (load.coverage && load.coverage.unreviewed) || load.unreviewed_count || 0;
+  const pendingDup = (load.coverage && load.coverage.duplicate_unresolved) || load.duplicate_count || 0;
+  const hasRegistry = (load.lineage_count || 0) > 0 || (load.registry_path || '');
+  if (queueEmpty && lastPhase && (pendingUnreviewed > 0 || pendingDup > 0)) return false;
+  if (queueEmpty && lastPhase && (reviewed.length > 0 || hasRegistry)) {
+    showReviewComplete({
+      message: `Loaded ${load.lineage_count || reviewed.length} saved spine(s) from disk — not saved just now.`,
+      registry_path: load.registry_path || expectedRegistryPath(load),
+      registry_mtime: load.registry_mtime || load.decisions_mtime || '',
+    });
+    return true;
+  }
+  return false;
+}
+
+function esc(s){ return String(s).replace(/[^a-zA-Z0-9]+/g,'_'); }
+
+function dispKey(tp, mode) {
+  if (!S.display[tp]) S.display[tp] = { zoom: {brightness:0, contrast:1}, fov: {brightness:0, contrast:1} };
+  return S.display[tp][mode];
+}
+
+async function api(path, opts, timeoutMs) {
+  const ms = timeoutMs == null ? 180000 : timeoutMs;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  try {
+    const r = await fetch(path, { ...(opts || {}), signal: ctrl.signal });
+    let data;
+    try { data = await r.json(); } catch { data = { detail: await r.text() }; }
+    if (!r.ok) {
+      let msg = data.detail;
+      if (Array.isArray(msg)) msg = msg.map(x => x.msg || JSON.stringify(x)).join('; ');
+      if (msg && typeof msg === 'object') msg = JSON.stringify(msg);
+      throw new Error(String(msg || r.statusText || 'Request failed'));
+    }
+    return data;
+  } catch (e) {
+    if (e && e.name === 'AbortError') {
+      throw new Error('Request timed out — data on E: can be slow. Wait and retry, or check the server window.');
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function panelBounds(cv) {
+  return cv._bounds || (cv._panelData && cv._panelData.stack_bounds) || null;
+}
+
+function displaySlidersHtml(tp, mode) {
+  const id = esc(tp)+'_'+mode;
+  return `<div class="disp" data-tp="${tp}" data-mode="${mode}">
+    <label>B <input type="range" id="b_${id}" min="-50" max="50" value="0" oninput="onDisplayChange('${tp}','${mode}')"/></label>
+    <label>C <input type="range" id="c_${id}" min="50" max="200" value="100" oninput="onDisplayChange('${tp}','${mode}')"/></label>
+  </div>`;
+}
+
+function onDisplayChange(tp, mode) {
+  const id = esc(tp)+'_'+mode;
+  const d = dispKey(tp, mode);
+  d.brightness = (parseInt(document.getElementById('b_'+id).value,10)||0) / 100;
+  d.contrast = (parseInt(document.getElementById('c_'+id).value,10)||100) / 100;
+  const cvId = mode === 'zoom' ? 'cz_'+esc(tp) : 'cf_'+esc(tp);
+  const cv = document.getElementById(cvId);
+  if (cv && cv._panelData) redrawCanvas(cv, cv._panelData, tp, mode);
+}
+
+function applyDisplayPixels(pixels, lo, hi, brightness, contrast) {
+  const span = Math.max(hi - lo, 1e-6);
+  const out = new Uint8ClampedArray(pixels.length * 4);
+  for (let i = 0; i < pixels.length; i++) {
+    let n = (pixels[i] / 255.0);
+    n = ((n - 0.5) * contrast + 0.5) + brightness;
+    n = Math.max(0, Math.min(1, n));
+    const v = Math.round(n * 255);
+    const j = i * 4;
+    out[j] = out[j+1] = out[j+2] = v;
+    out[j+3] = 255;
+  }
+  return out;
+}
+
+function drawMarkers(ctx, markers) {
+  for (const m of markers) {
+    const x = m.x, y = m.y;
+    ctx.font = '10px sans-serif';
+    ctx.textAlign = 'center';
+    if (m.role === 'focus') {
+      ctx.strokeStyle = '#22c55e'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(x, y, 7, 0, Math.PI*2); ctx.stroke();
+      ctx.fillStyle = '#22c55e'; ctx.fillText(m.label, x, y - 10);
+    } else if (m.role === 'conflict_a') {
+      ctx.strokeStyle = '#2563eb'; ctx.lineWidth = 2.5;
+      ctx.beginPath(); ctx.arc(x, y, 8, 0, Math.PI*2); ctx.stroke();
+      ctx.fillStyle = '#2563eb'; ctx.fillText(m.label, x, y - 11);
+    } else if (m.role === 'conflict_b') {
+      ctx.strokeStyle = '#dc2626'; ctx.lineWidth = 2.5;
+      ctx.beginPath(); ctx.arc(x, y, 8, 0, Math.PI*2); ctx.stroke();
+      ctx.fillStyle = '#dc2626'; ctx.fillText(m.label, x, y + 16);
+    } else if (m.role === 'anchor') {
+      ctx.strokeStyle = '#a78bfa'; ctx.lineWidth = 1.5; ctx.setLineDash([3,3]);
+      ctx.beginPath(); ctx.moveTo(x-8,y); ctx.lineTo(x+8,y); ctx.moveTo(x,y-8); ctx.lineTo(x,y+8); ctx.stroke();
+      ctx.setLineDash([]);
+    } else if (m.role === 'manual') {
+      ctx.strokeStyle = '#22d3ee'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(x, y, 6, 0, Math.PI*2); ctx.stroke();
+      ctx.fillStyle = '#22d3ee'; ctx.fillText(m.label, x, y - 9);
+    } else if (m.role === 'region') {
+      ctx.strokeStyle = '#f97316'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(x, y, 6, 0, Math.PI*2); ctx.stroke();
+      ctx.fillStyle = '#f97316'; ctx.fillText('?', x, y - 9);
+    } else {
+      const assigned = !!m.assigned;
+      ctx.fillStyle = assigned ? '#dc2626' : 'rgba(255,255,255,0.92)';
+      ctx.strokeStyle = assigned ? 'rgba(220,38,38,0.55)' : 'rgba(0,0,0,0.5)'; ctx.lineWidth = 1;
+      const t = String(m.label);
+      ctx.strokeText(t, x, y - 6); ctx.fillText(t, x, y - 6);
+      ctx.beginPath(); ctx.arc(x, y, 2.5, 0, Math.PI*2);
+      ctx.fillStyle = assigned ? '#dc2626' : '#fff'; ctx.fill(); ctx.stroke();
+    }
+  }
+}
+
+function fovSpanFor(tp) {
+  if (!S.fovSpan[tp]) S.fovSpan[tp] = 320;
+  return S.fovSpan[tp];
+}
+
+function stackFromCanvasPx(cv, cx, cy, b) {
+  const r = cv.getBoundingClientRect();
+  const px = (cx - r.left) / r.width;
+  const py = (cy - r.top) / r.height;
+  return {
+    sx: b.x0 + px * (b.x1 - b.x0),
+    sy: b.y0 + py * (b.y1 - b.y0),
+    px: px * cv.width,
+    py: py * cv.height,
+  };
+}
+
+function showPanelError(err) {
+  const msg = String(err && err.message ? err.message : err);
+  if (/Unknown timepoint|No TIFF/i.test(msg)) {
+    document.getElementById('status').textContent =
+      'Session expired — click Load animal (or refresh the page).';
+  } else {
+    document.getElementById('status').textContent = msg;
+  }
+}
+
+function cloneShape(sh) {
+  if (!sh) return null;
+  if (sh.shape === 'polygon') {
+    return { shape: 'polygon', points: (sh.points || []).map(p => [p[0], p[1]]) };
+  }
+  return { shape: 'rect', x0: sh.x0, y0: sh.y0, x1: sh.x1, y1: sh.y1 };
+}
+
+function getOofSegment(segmentId) {
+  return (S.oofSegments || []).find(s => String(s.segment_id) === String(segmentId)) || null;
+}
+
+function stackShapeForTp(seg, tp) {
+  if (!seg) return null;
+  const pre = seg.pre_tp;
+  const per = seg.per_tp || {};
+  if (per[tp]) return cloneShape(per[tp]);
+  if (tp === pre) return cloneShape(seg.pre_shape || seg.pre_bounds);
+  return null;
+}
+
+function stackShapeToCanvasOverlay(sh, b, w, h) {
+  const sw = Math.max(b.x1 - b.x0, 1e-6);
+  const shh = Math.max(b.y1 - b.y0, 1e-6);
+  const toPx = (sx, sy) => [((sx - b.x0) / sw) * w, ((sy - b.y0) / shh) * h];
+  if (sh.shape === 'polygon') {
+    return { shape: 'polygon', points: (sh.points || []).map(p => toPx(p[0], p[1])) };
+  }
+  const p0 = toPx(sh.x0, sh.y0);
+  const p1 = toPx(sh.x1, sh.y1);
+  return { shape: 'rect', x0: p0[0], y0: p0[1], x1: p1[0], y1: p1[1] };
+}
+
+function overlayCanvasBBox(o) {
+  if (o.shape === 'polygon' && o.points && o.points.length) {
+    const xs = o.points.map(p => p[0]);
+    const ys = o.points.map(p => p[1]);
+    return { x0: Math.min(...xs), y0: Math.min(...ys), x1: Math.max(...xs), y1: Math.max(...ys) };
+  }
+  return {
+    x0: Math.min(o.x0, o.x1), y0: Math.min(o.y0, o.y1),
+    x1: Math.max(o.x0, o.x1), y1: Math.max(o.y0, o.y1),
+  };
+}
+
+function pointInCanvasPolygon(px, py, points) {
+  let inside = false;
+  for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
+    const xi = points[i][0], yi = points[i][1];
+    const xj = points[j][0], yj = points[j][1];
+    if (((yi > py) !== (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi + 1e-12) + xi)) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+function pointInCanvasOverlay(o, px, py) {
+  if (o.shape === 'polygon' && o.points && o.points.length >= 3) {
+    return pointInCanvasPolygon(px, py, o.points);
+  }
+  const bb = overlayCanvasBBox(o);
+  return px >= bb.x0 && px <= bb.x1 && py >= bb.y0 && py <= bb.y1;
+}
+
+function overlayResizeHandle(o, px, py, radius = 12) {
+  const bb = overlayCanvasBBox(o);
+  const corners = {
+    nw: [bb.x0, bb.y0], ne: [bb.x1, bb.y0], sw: [bb.x0, bb.y1], se: [bb.x1, bb.y1],
+  };
+  for (const [name, [cx, cy]] of Object.entries(corners)) {
+    if (Math.hypot(px - cx, py - cy) <= radius) return name;
+  }
+  return null;
+}
+
+function oofOverlaysForCanvas(cv, tp, data) {
+  const b = cv._bounds || data.stack_bounds;
+  let overlays = (data.oof_overlays || []).slice();
+  if (S.oofEdit && S.oofEdit.cv === cv && S.oofEdit.tp === tp && b) {
+    const canvasShape = stackShapeToCanvasOverlay(S.oofEdit.workingStack, b, cv.width, cv.height);
+    canvasShape.segment_id = S.oofEdit.segmentId;
+    overlays = overlays.filter(o => o.segment_id !== S.oofEdit.segmentId);
+    overlays.push(canvasShape);
+  }
+  return overlays;
+}
+
+function showOofSegmentInfo(segmentId, tp) {
+  const segs = S.oofSegments || [];
+  const seg = getOofSegment(segmentId);
+  const idx = seg ? segs.indexOf(seg) : -1;
+  const summary = seg ? oofSegmentSummary(seg, idx >= 0 ? idx : 0) : { id: segmentId, label: '' };
+  const el = document.getElementById('status');
+  if (el) {
+    el.textContent = `OOF segment: ${summary.id}${summary.label ? ' · ' + summary.label : ''} @ ${tp}. Use "Remove OOF segment" to delete.`;
+  }
+}
+
+function hitTestOofOverlay(cv, clientX, clientY) {
+  const data = cv._panelData;
+  const b = cv._bounds || (data && data.stack_bounds);
+  if (!data || !b) return null;
+  const tp = data.timepoint;
+  const p = stackFromCanvasPx(cv, clientX, clientY, b);
+  const overlays = oofOverlaysForCanvas(cv, tp, data);
+  for (let i = overlays.length - 1; i >= 0; i--) {
+    const o = overlays[i];
+    if (!o.segment_id) continue;
+    const handle = overlayResizeHandle(o, p.px, p.py);
+    if (handle) return { overlay: o, action: 'resize', handle };
+    if (pointInCanvasOverlay(o, p.px, p.py)) return { overlay: o, action: 'move', handle: null };
+  }
+  return null;
+}
+
+function stackBBox(sh) {
+  if (sh.shape === 'polygon') {
+    const xs = sh.points.map(p => p[0]);
+    const ys = sh.points.map(p => p[1]);
+    return { x0: Math.min(...xs), y0: Math.min(...ys), x1: Math.max(...xs), y1: Math.max(...ys) };
+  }
+  return {
+    x0: Math.min(sh.x0, sh.x1), y0: Math.min(sh.y0, sh.y1),
+    x1: Math.max(sh.x0, sh.x1), y1: Math.max(sh.y0, sh.y1),
+  };
+}
+
+function translateShape(sh, dx, dy) {
+  if (sh.shape === 'polygon') {
+    return { shape: 'polygon', points: sh.points.map(p => [p[0] + dx, p[1] + dy]) };
+  }
+  return { shape: 'rect', x0: sh.x0 + dx, y0: sh.y0 + dy, x1: sh.x1 + dx, y1: sh.y1 + dy };
+}
+
+function resizeBBoxByHandle(bb, handle, sx, sy) {
+  const out = { ...bb };
+  if (handle === 'nw') { out.x0 = sx; out.y0 = sy; }
+  else if (handle === 'ne') { out.x1 = sx; out.y0 = sy; }
+  else if (handle === 'sw') { out.x0 = sx; out.y1 = sy; }
+  else if (handle === 'se') { out.x1 = sx; out.y1 = sy; }
+  if (out.x0 > out.x1) { const t = out.x0; out.x0 = out.x1; out.x1 = t; }
+  if (out.y0 > out.y1) { const t = out.y0; out.y0 = out.y1; out.y1 = t; }
+  return out;
+}
+
+function scalePointsToBBox(points, oldBb, newBb) {
+  const ow = Math.max(oldBb.x1 - oldBb.x0, 1e-6);
+  const oh = Math.max(oldBb.y1 - oldBb.y0, 1e-6);
+  const nw = newBb.x1 - newBb.x0;
+  const nh = newBb.y1 - newBb.y0;
+  return points.map(([x, y]) => [
+    newBb.x0 + (x - oldBb.x0) / ow * nw,
+    newBb.y0 + (y - oldBb.y0) / oh * nh,
+  ]);
+}
+
+function resizeShapeAtPointer(sh, handle, sx, sy) {
+  if (sh.shape === 'polygon') {
+    const bb0 = stackBBox(sh);
+    const bb1 = resizeBBoxByHandle(bb0, handle, sx, sy);
+    return { shape: 'polygon', points: scalePointsToBBox(sh.points, bb0, bb1) };
+  }
+  let { x0, y0, x1, y1 } = sh;
+  if (handle === 'nw') { x0 = sx; y0 = sy; }
+  else if (handle === 'ne') { x1 = sx; y0 = sy; }
+  else if (handle === 'sw') { x0 = sx; y1 = sy; }
+  else if (handle === 'se') { x1 = sx; y1 = sy; }
+  return { shape: 'rect', x0, y0, x1, y1 };
+}
+
+function applyOofEditDrag(p) {
+  const ed = S.oofEdit;
+  if (!ed) return;
+  const dx = p.sx - ed.startPtr.sx;
+  const dy = p.sy - ed.startPtr.sy;
+  if (ed.action === 'move') {
+    ed.workingStack = translateShape(ed.originStack, dx, dy);
+  } else {
+    ed.workingStack = resizeShapeAtPointer(ed.originStack, ed.handle, p.sx, p.sy);
+  }
+}
+
+function startOofEdit(hit, tp, cv, kind, e) {
+  const seg = getOofSegment(hit.overlay.segment_id);
+  const stackShape = stackShapeForTp(seg, tp);
+  if (!stackShape) return false;
+  const b = cv._bounds;
+  if (!b) return false;
+  const p = stackFromCanvasPx(cv, e.clientX, e.clientY, b);
+  S.oofEdit = {
+    segmentId: hit.overlay.segment_id,
+    tp, cv, kind,
+    action: hit.action,
+    handle: hit.handle,
+    originStack: cloneShape(stackShape),
+    workingStack: cloneShape(stackShape),
+    startPtr: { sx: p.sx, sy: p.sy, px: p.px, py: p.py },
+  };
+  showOofSegmentInfo(hit.overlay.segment_id, tp);
+  return true;
+}
+
+async function saveOofEdit() {
+  const ed = S.oofEdit;
+  if (!ed) return;
+  const sh = ed.workingStack;
+  S.oofEdit = null;
+  const body = {
+    segment_id: ed.segmentId,
+    timepoint: ed.tp,
+    action: 'update',
+    shape: sh.shape || 'rect',
+  };
+  if (sh.shape === 'polygon') body.points = sh.points;
+  else { body.x0 = sh.x0; body.y0 = sh.y0; body.x1 = sh.x1; body.y1 = sh.y1; }
+  if (S.oofPropagateShift && ed.action === 'move') body.propagate_shift = true;
+  try {
+    const res = await api('/mtp/viewer/oof-segment-tp', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    S.oofSegments = res.segments || [];
+    if (res.spine_ids) {
+      S.t1SpineIds = res.spine_ids;
+      fillSpinePick();
+    }
+    document.getElementById('status').textContent =
+      `OOF updated on ${ed.tp} (${ed.segmentId}).`;
+    await refreshAll();
+  } catch (err) {
+    document.getElementById('status').textContent = String(err.message || err);
+  }
+}
+
+function drawOofHandles(ctx, o) {
+  const bb = overlayCanvasBBox(o);
+  const corners = [[bb.x0, bb.y0], [bb.x1, bb.y0], [bb.x0, bb.y1], [bb.x1, bb.y1]];
+  ctx.fillStyle = '#fff';
+  ctx.strokeStyle = '#ea580c';
+  ctx.lineWidth = 1.5;
+  for (const [x, y] of corners) {
+    ctx.fillRect(x - 4, y - 4, 8, 8);
+    ctx.strokeRect(x - 4, y - 4, 8, 8);
+  }
+}
+
+function drawOofOverlays(ctx, overlays, cv, tp) {
+  const showHandles = S.oofMode;
+  const editingId = S.oofEdit && S.oofEdit.cv === cv ? S.oofEdit.segmentId : null;
+  for (const o of overlays || []) {
+    const isEdit = editingId && o.segment_id === editingId;
+    ctx.fillStyle = isEdit ? 'rgba(37,99,235,0.24)' : 'rgba(249,115,22,0.22)';
+    ctx.strokeStyle = isEdit ? 'rgba(37,99,235,0.95)' : 'rgba(249,115,22,0.85)';
+    ctx.lineWidth = isEdit ? 2 : 1.5;
+    if (o.shape === 'polygon' && o.points && o.points.length >= 3) {
+      ctx.beginPath();
+      ctx.moveTo(o.points[0][0], o.points[0][1]);
+      for (let i = 1; i < o.points.length; i++) ctx.lineTo(o.points[i][0], o.points[i][1]);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+    } else {
+      const w = o.x1 - o.x0, h = o.y1 - o.y0;
+      ctx.fillRect(o.x0, o.y0, w, h);
+      ctx.strokeRect(o.x0, o.y0, w, h);
+    }
+    if (showHandles) drawOofHandles(ctx, o);
+  }
+}
+
+function drawOofLivePreview(ctx, cv) {
+  if (!S.oofPreview || S.oofPreview.cv !== cv) return;
+  ctx.strokeStyle = 'rgba(249,115,22,0.95)';
+  ctx.lineWidth = 2;
+  if (S.oofPreview.mode === 'rect') {
+    const { x0, y0, x1, y1 } = S.oofPreview;
+    ctx.strokeRect(Math.min(x0,x1), Math.min(y0,y1), Math.abs(x1-x0), Math.abs(y1-y0));
+    return;
+  }
+  const pts = S.oofPreview.points || [];
+  if (pts.length < 2) return;
+  ctx.beginPath();
+  ctx.moveTo(pts[0][0], pts[0][1]);
+  for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+  ctx.stroke();
+}
+
+function redrawCanvas(cv, data, tp, mode) {
+  if (!cv || !data) return;
+  cv.width = data.width; cv.height = data.height;
+  const ctx = cv.getContext('2d');
+  const d = dispKey(tp, mode);
+  const imgData = ctx.createImageData(data.width, data.height);
+  const px = applyDisplayPixels(data.pixels, data.intensity_min, data.intensity_max, d.brightness, d.contrast);
+  imgData.data.set(px);
+  ctx.putImageData(imgData, 0, 0);
+  const overlays = oofOverlaysForCanvas(cv, tp, data);
+  drawOofOverlays(ctx, overlays, cv, tp);
+  drawOofLivePreview(ctx, cv);
+  drawMarkers(ctx, data.markers || []);
+  cv._panelData = data;
+  cv._bounds = data.stack_bounds;
+}
+
+function drawCanvas(id, data, tp, mode) {
+  const cv = document.getElementById(id);
+  if (!cv || !data) return;
+  redrawCanvas(cv, data, tp, mode);
+  if (data.z_plane != null && mode === 'fov') S.fovZ[data.timepoint] = data.z_plane;
+}
+
+function buildColumns() {
+  const zr = document.getElementById('zoomRow');
+  const fr = document.getElementById('fovRow');
+  zr.innerHTML = ''; fr.innerHTML = '';
+  S.timepoints.forEach(tp => {
+    const zcol = document.createElement('div'); zcol.className='col'; zcol.dataset.tp = tp;
+    zcol.innerHTML = `<div class="panel">
+      <div class="ph" id="zh_${esc(tp)}"><div class="tp">${tp}</div><div class="meta">—</div></div>
+      ${displaySlidersHtml(tp,'zoom')}
+      <canvas class="pan" id="cz_${esc(tp)}" width="10" height="10"></canvas>
+      <div class="fate-bar fate-bar-a" id="fateA_${esc(tp)}" style="display:none"></div></div>`;
+    zr.appendChild(zcol);
+    bindPanelPointer(tp, document.getElementById('cz_'+esc(tp)), 'zoom');
+
+    const fcol = document.createElement('div'); fcol.className='col'; fcol.dataset.tp = tp;
+    fcol.innerHTML = `<div class="panel">
+      <div class="ph" id="fh_${esc(tp)}"><div class="tp">${tp}</div><div class="meta">Z —</div>
+        <span class="fov-zoom" id="fhz_${esc(tp)}" title="FOV zoom">
+          <button type="button" onclick="zoomFov('${tp}',1.3)" title="Zoom out (wider)">−</button>
+          <button type="button" onclick="zoomFov('${tp}',0.77)" title="Zoom in">+</button>
+          <button type="button" onclick="fitFov('${tp}')" title="Fit full image">Fit</button>
+        </span></div>
+      ${displaySlidersHtml(tp,'fov')}
+      <canvas class="pan fov" id="cf_${esc(tp)}" width="10" height="10"></canvas>
+      <div class="fate-bar" id="fate_${esc(tp)}"></div></div>`;
+    fr.appendChild(fcol);
+    bindPanelPointer(tp, document.getElementById('cf_'+esc(tp)), 'fov');
+  });
+  updateOofZoomUi();
+  highlightActiveTimepointColumn();
+}
+
+function updateOofZoomUi() {
+  const on = S.oofMode;
+  document.getElementById('oofHint').style.display = on ? 'inline' : 'none';
+  document.getElementById('oofPropLabel').style.display = on ? 'flex' : 'none';
+}
+
+function fovSpanMax(tp) {
+  const cv = document.getElementById('cf_'+esc(tp));
+  const w = cv?._panelData?.stack_width;
+  const h = cv?._panelData?.stack_height;
+  if (w && h) return Math.max(w, h) * 1.15;
+  return 10000;
+}
+
+function zoomFov(tp, factor) {
+  if (S.phaseKind === 'duplicate') {
+    const cur = S.zoomSizeB[tp] || 160;
+    S.zoomSizeB[tp] = Math.max(40, Math.min(480, Math.round(cur * factor)));
+    refreshLineageB(tp);
+    return;
+  }
+  const cur = fovSpanFor(tp);
+  const max = fovSpanMax(tp);
+  S.fovSpan[tp] = Math.min(max, Math.max(80, cur * factor));
+  refreshFov(tp);
+}
+
+function fitFov(tp) {
+  if (S.phaseKind === 'duplicate') {
+    S.zoomSizeB[tp] = 480;
+    refreshLineageB(tp);
+    return;
+  }
+  const cv = document.getElementById('cf_'+esc(tp));
+  const w = cv?._panelData?.stack_width;
+  const h = cv?._panelData?.stack_height;
+  S.fovSpan[tp] = (w && h) ? Math.max(w, h) * 1.05 : 2000;
+  refreshFov(tp);
+}
+
+function oofRepaintPreview(cv, tp, kind) {
+  if (!cv || !cv._panelData) return;
+  redrawCanvas(cv, cv._panelData, tp, kind || 'fov');
+}
+
+function conflictZoomSize(row, tp) {
+  const map = row === 'b' ? S.zoomSizeB : S.zoomSizeA;
+  return map[tp] || 160;
+}
+
+function setConflictZoomSize(row, tp, size) {
+  const map = row === 'b' ? S.zoomSizeB : S.zoomSizeA;
+  map[tp] = Math.max(40, Math.min(480, Math.round(size)));
+}
+
+function adjustConflictZ(tp, delta) {
+  const z = S.fovZ[tp] ?? Math.round(S.positions[tp]?.z ?? 0);
+  const zmax = S.fovZMax[tp] ?? 9999;
+  S.fovZ[tp] = Math.max(0, Math.min(z + delta, zmax));
+  refreshZoom(tp);
+  refreshLineageB(tp);
+}
+
+function adjustConflictZoom(row, tp, factor) {
+  setConflictZoomSize(row, tp, conflictZoomSize(row, tp) * factor);
+  if (row === 'b') refreshLineageB(tp);
+  else refreshZoom(tp);
+}
+
+function bindPanelPointer(tp, cv, kind) {
+  if (!cv) return;
+  let start = null;
+  let panning = false;
+  cv.addEventListener('pointerdown', e => {
+    if (S.oofMode) {
+      if (e.altKey || e.button === 2) {
+        start = { x: e.clientX, y: e.clientY, pan: true };
+        panning = false;
+        cv.classList.add('dragging');
+        try { cv.setPointerCapture(e.pointerId); } catch (_) {}
+        e.preventDefault();
+        return;
+      }
+      const b = cv._bounds;
+      if (!b) return;
+      if (!e.shiftKey) {
+        const hit = hitTestOofOverlay(cv, e.clientX, e.clientY);
+        if (hit && startOofEdit(hit, tp, cv, kind, e)) {
+          try { cv.setPointerCapture(e.pointerId); } catch (_) {}
+          e.preventDefault();
+          return;
+        }
+      }
+      if (e.shiftKey) {
+        S.oofDrag = { tp, cv, kind, x0: e.clientX, y0: e.clientY, x1: e.clientX, y1: e.clientY };
+        S.oofPreview = { cv, mode: 'rect', x0: 0, y0: 0, x1: 0, y1: 0 };
+      } else {
+        const p = stackFromCanvasPx(cv, e.clientX, e.clientY, b);
+        S.oofStroke = { tp, cv, kind, stackPoints: [[p.sx, p.sy]], canvasPoints: [[p.px, p.py]] };
+        S.oofPreview = { cv, mode: 'freehand', points: [[p.px, p.py]] };
+      }
+      try { cv.setPointerCapture(e.pointerId); } catch (_) {}
+      e.preventDefault();
+      return;
+    }
+    start = { x: e.clientX, y: e.clientY };
+    panning = false;
+    cv.classList.add('dragging');
+    try { cv.setPointerCapture(e.pointerId); } catch (_) {}
+    e.preventDefault();
+  });
+  cv.addEventListener('pointermove', e => {
+    if (S.oofDrag && S.oofPreview && S.oofPreview.mode === 'rect') {
+      S.oofDrag.x1 = e.clientX;
+      S.oofDrag.y1 = e.clientY;
+      const r = cv.getBoundingClientRect();
+      S.oofPreview.x0 = (S.oofDrag.x0 - r.left) / r.width * cv.width;
+      S.oofPreview.y0 = (S.oofDrag.y0 - r.top) / r.height * cv.height;
+      S.oofPreview.x1 = (S.oofDrag.x1 - r.left) / r.width * cv.width;
+      S.oofPreview.y1 = (S.oofDrag.y1 - r.top) / r.height * cv.height;
+      oofRepaintPreview(cv, tp, kind);
+      return;
+    }
+    if (S.oofEdit && S.oofEdit.cv === cv) {
+      const b = cv._bounds;
+      if (!b) return;
+      const p = stackFromCanvasPx(cv, e.clientX, e.clientY, b);
+      applyOofEditDrag(p);
+      oofRepaintPreview(cv, tp, kind);
+      return;
+    }
+    if (S.oofStroke) {
+      const b = cv._bounds;
+      if (!b) return;
+      const p = stackFromCanvasPx(cv, e.clientX, e.clientY, b);
+      const last = S.oofStroke.canvasPoints[S.oofStroke.canvasPoints.length - 1];
+      if (!last || Math.hypot(p.px - last[0], p.py - last[1]) > 3) {
+        S.oofStroke.stackPoints.push([p.sx, p.sy]);
+        S.oofStroke.canvasPoints.push([p.px, p.py]);
+        S.oofPreview.points = S.oofStroke.canvasPoints.slice();
+        oofRepaintPreview(cv, tp, kind);
+      }
+      return;
+    }
+    if (!start) return;
+    const dx = e.clientX - start.x;
+    const dy = e.clientY - start.y;
+    if (!panning) {
+      if (Math.hypot(dx, dy) < 12) return;
+      panning = true;
+    }
+    if (kind === 'fov') panFov(tp, -dx, -dy);
+    else panZoom(tp, -dx, -dy);
+    start = { x: e.clientX, y: e.clientY };
+  });
+  cv.addEventListener('pointerup', async e => {
+    cv.classList.remove('dragging');
+    try { cv.releasePointerCapture(e.pointerId); } catch (_) {}
+    if (S.oofEdit) {
+      await saveOofEdit();
+      start = null;
+      panning = false;
+      return;
+    }
+    if (S.oofDrag) {
+      const od = S.oofDrag;
+      S.oofDrag = null;
+      S.oofPreview = null;
+      await finishOofRect(od);
+      start = null;
+      panning = false;
+      return;
+    }
+    if (S.oofStroke) {
+      const st = S.oofStroke;
+      S.oofStroke = null;
+      S.oofPreview = null;
+      await finishOofFreehand(st);
+      start = null;
+      panning = false;
+      return;
+    }
+    if (!panning && start && !S.oofMode) {
+      const hit = hitTestOofOverlay(cv, e.clientX, e.clientY);
+      if (hit && hit.overlay.segment_id) {
+        showOofSegmentInfo(hit.overlay.segment_id, tp);
+      } else {
+        await handlePanelClick(tp, cv, e, kind);
+      }
+    }
+    start = null;
+    panning = false;
+  });
+  cv.addEventListener('pointercancel', () => {
+    cv.classList.remove('dragging');
+    S.oofDrag = null;
+    S.oofStroke = null;
+    S.oofPreview = null;
+    S.oofEdit = null;
+    start = null;
+    panning = false;
+  });
+  if (kind === 'fov') {
+    cv.addEventListener('wheel', e => {
+      e.preventDefault();
+      if (S.phaseKind === 'duplicate') {
+        if (e.shiftKey) {
+          adjustConflictZ(tp, e.deltaY > 0 ? 1 : -1);
+          return;
+        }
+        adjustConflictZoom('b', tp, e.deltaY > 0 ? 1.12 : 0.89);
+        return;
+      }
+      if (e.shiftKey) {
+        const z = S.fovZ[tp] ?? Math.round(S.positions[tp]?.z ?? 0);
+        const zmax = S.fovZMax[tp] ?? 9999;
+        S.fovZ[tp] = Math.max(0, Math.min(z + (e.deltaY > 0 ? 1 : -1), zmax));
+        refreshFov(tp);
+        refreshZoom(tp);
+        return;
+      }
+      const factor = e.deltaY > 0 ? 1.1 : 0.9;
+      zoomFov(tp, factor);
+    }, { passive: false });
+  } else {
+    cv.addEventListener('wheel', e => {
+      if (S.phaseKind === 'duplicate') {
+        e.preventDefault();
+        if (e.shiftKey) {
+          adjustConflictZ(tp, e.deltaY > 0 ? 1 : -1);
+          return;
+        }
+        adjustConflictZoom('a', tp, e.deltaY > 0 ? 1.12 : 0.89);
+        return;
+      }
+      if (!S.oofMode) return;
+      e.preventDefault();
+    }, { passive: false });
+  }
+}
+
+function stackFromClick(cv, e, bounds) {
+  const rect = cv.getBoundingClientRect();
+  const px = (e.clientX - rect.left) / rect.width;
+  const py = (e.clientY - rect.top) / rect.height;
+  return {
+    sx: bounds.x0 + px * (bounds.x1 - bounds.x0),
+    sy: bounds.y0 + py * (bounds.y1 - bounds.y0)
+  };
+}
+
+async function finishOofRect(od) {
+  const b = od.cv._bounds;
+  if (!b) return;
+  const r = od.cv.getBoundingClientRect();
+  const xA = (od.x0 - r.left) / r.width, xB = (od.x1 - r.left) / r.width;
+  const yA = (od.y0 - r.top) / r.height, yB = (od.y1 - r.top) / r.height;
+  const x0 = b.x0 + Math.min(xA,xB) * (b.x1 - b.x0);
+  const x1 = b.x0 + Math.max(xA,xB) * (b.x1 - b.x0);
+  const y0 = b.y0 + Math.min(yA,yB) * (b.y1 - b.y0);
+  const y1 = b.y0 + Math.max(yA,yB) * (b.y1 - b.y0);
+  if (Math.abs(x1-x0) < 5 && Math.abs(y1-y0) < 5) return;
+  S.pendingOof = { timepoint: od.tp, shape: 'rect', x0, y0, x1, y1 };
+  openOofModal(od.tp);
+}
+
+async function finishOofFreehand(st) {
+  const pts = st.stackPoints || [];
+  if (pts.length < 3) return;
+  S.pendingOof = { timepoint: st.tp, shape: 'polygon', points: pts };
+  openOofModal(st.tp);
+}
+function openOofModal(srcTp) {
+  const list = document.getElementById('oofTpList');
+  list.innerHTML = '';
+  (S.timepoints || []).forEach(tp => {
+    const id = 'oof_tp_'+esc(tp);
+    const checked = tp === srcTp ? ' checked' : '';
+    list.innerHTML += `<label><input type="checkbox" id="${id}" value="${tp.replace(/"/g,'')}"${checked}/> ${tp}${tp===srcTp?' (drawn here)':''}</label>`;
+  });
+  document.getElementById('oofModalHint').textContent =
+    `Drawn on ${srcTp}. Spines inside the shape will be ignored. Select timepoints to apply (registration-adjusted).`;
+  document.getElementById('oofModalBackdrop').classList.add('open');
+}
+
+function oofSelectAllTps(on) {
+  document.querySelectorAll('#oofTpList input[type=checkbox]').forEach(cb => { cb.checked = on; });
+}
+
+function cancelOofModal() {
+  S.pendingOof = null;
+  document.getElementById('oofModalBackdrop').classList.remove('open');
+}
+
+function oofSelectedTimepoints() {
+  return Array.from(document.querySelectorAll('#oofTpList input[type=checkbox]:checked')).map(cb => cb.value);
+}
+
+async function confirmOofApply() {
+  const pending = S.pendingOof;
+  if (!pending) return;
+  const applyTps = oofSelectedTimepoints();
+  if (!applyTps.length) {
+    document.getElementById('status').textContent = 'Select at least one timepoint.';
+    return;
+  }
+  try {
+    const body = {
+      timepoint: pending.timepoint,
+      action: 'upsert',
+      apply_timepoints: applyTps,
+      shape: pending.shape || 'rect',
+    };
+    if (body.shape === 'polygon') {
+      body.points = pending.points;
+    } else {
+      body.x0 = pending.x0; body.y0 = pending.y0; body.x1 = pending.x1; body.y1 = pending.y1;
+    }
+    const res = await api('/mtp/viewer/oof-segment', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(body)
+    });
+    S.oofSegments = res.segments || [];
+    cancelOofModal();
+    const nIgn = res.ignored_count || 0;
+    document.getElementById('status').textContent =
+      `OOF applied to ${applyTps.length} TP(s); ${nIgn} spine(s) ignored.`;
+    if (res.spine_ids) {
+      S.t1SpineIds = res.spine_ids;
+      fillSpinePick();
+    }
+    await refreshAll();
+  } catch(err) {
+    document.getElementById('status').textContent = String(err.message||err);
+  }
+}
+
+document.getElementById('oofModalBackdrop').addEventListener('click', cancelOofModal);
+document.getElementById('oofRemoveBackdrop').addEventListener('click', closeOofRemoveModal);
+
+function oofSegmentSummary(seg, i) {
+  const id = seg.segment_id || `segment_${i + 1}`;
+  const sh = seg.pre_shape || seg.pre_bounds || {};
+  const kind = sh.shape === 'polygon' ? 'freehand' : 'rectangle';
+  const pre = seg.pre_tp || '—';
+  const tps = new Set(Object.keys(seg.per_tp || {}));
+  if (pre) tps.add(pre);
+  return { id, label: `${kind} · anchor ${pre} · ${tps.size} timepoint(s)` };
+}
+
+function renderOofRemoveList() {
+  const list = document.getElementById('oofSegList');
+  if (!list) return;
+  const segs = S.oofSegments || [];
+  if (!segs.length) {
+    list.innerHTML = '<div class="oof-seg-empty">No OOF segments for this FOV.</div>';
+    return;
+  }
+  list.innerHTML = segs.map((seg, i) => {
+    const s = oofSegmentSummary(seg, i);
+    return `<div class="oof-seg-item">
+      <div class="oof-seg-meta">
+        <div class="oof-seg-id">${s.id}</div>
+        <div class="oof-seg-desc">${s.label}</div>
+      </div>
+      <button type="button" class="danger" data-oof-remove="${s.id}">Remove</button>
+    </div>`;
+  }).join('');
+}
+
+document.getElementById('oofSegList').addEventListener('click', e => {
+  const btn = e.target.closest('[data-oof-remove]');
+  if (!btn) return;
+  deleteOofSegment(btn.getAttribute('data-oof-remove'));
+});
+
+function openOofRemoveModal() {
+  if (!S.timepoints.length) {
+    document.getElementById('status').textContent = 'Load a FOV first.';
+    return;
+  }
+  renderOofRemoveList();
+  document.getElementById('oofRemoveBackdrop').classList.add('open');
+}
+
+function closeOofRemoveModal() {
+  document.getElementById('oofRemoveBackdrop').classList.remove('open');
+}
+
+async function deleteOofSegment(segmentId) {
+  if (!segmentId) return;
+  if (!confirm(`Remove OOF segment ${segmentId}? Spines inside will rejoin the queue unless covered by another region.`)) return;
+  try {
+    const res = await api('/mtp/viewer/oof-segment', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'delete',
+        segment_id: segmentId,
+        timepoint: S.timepoints[0] || '',
+      }),
+    });
+    S.oofSegments = res.segments || [];
+    if (res.spine_ids) {
+      S.t1SpineIds = res.spine_ids;
+      fillSpinePick();
+    }
+    renderOofRemoveList();
+    document.getElementById('status').textContent =
+      `Removed ${segmentId}. ${S.oofSegments.length} OOF segment(s) remaining.`;
+    await refreshAll();
+    if (!S.oofSegments.length) closeOofRemoveModal();
+  } catch (err) {
+    document.getElementById('status').textContent = String(err.message || err);
+  }
+}
+
+function canvasClickXY(cv, e) {
+  const rect = cv.getBoundingClientRect();
+  return {
+    x: (e.clientX - rect.left) / rect.width * cv.width,
+    y: (e.clientY - rect.top) / rect.height * cv.height,
+  };
+}
+
+/** Return spine id if click is on/near an existing marker (canvas pixels). */
+function nearestSpineMarker(cv, e, maxDist = 18) {
+  const pt = canvasClickXY(cv, e);
+  const markers = (cv._panelData && cv._panelData.markers) || [];
+  let bestId = null;
+  let bestD = maxDist;
+  for (const m of markers) {
+    if (m.role === 'region' || m.role === 'anchor') continue;
+    const label = String(m.label || m.spine_id || '').trim();
+    if (!label || label === '?' || label === '+') continue;
+    const d = Math.hypot(Number(m.x) - pt.x, Number(m.y) - pt.y);
+    if (d < bestD) {
+      bestD = d;
+      bestId = label;
+    }
+  }
+  return bestId;
+}
+
+async function handlePanelClick(tp, cv, e, kind) {
+  const row = (S.phaseKind === 'duplicate' && cv && cv.id && cv.id.startsWith('cf_')) ? 'b' : 'a';
+  if (S.phaseKind === 'duplicate') {
+    setConflictFocus(row);
+  }
+  if (S.addSpineMode) {
+    await addManualSpineClick(tp, cv, e, row);
+    return;
+  }
+  if (kind === 'zoom') {
+    const nearId = nearestSpineMarker(cv, e);
+    if (nearId) {
+      await selectExistingSpine(tp, nearId, row);
+      return;
+    }
+  }
+  await clickPanel(tp, cv, e, row);
+}
+
+async function selectExistingSpine(tp, spineId, row) {
+  pushUndo();
+  const body = { timepoint: tp, spine_id: spineId };
+  if (row) body.lineage_row = row;
+  try {
+    const res = await api('/mtp/viewer/set-spine', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(body)
+    });
+    applyPositionsResponse(res);
+    const pmap = row === 'b' ? S.positionsB : S.positions;
+    const p = pmap[tp];
+    if (p) {
+      S.fovCenter[tp] = { x: p.x, y: p.y };
+      S.zoomCenter[tp] = { x: p.x, y: p.y };
+    }
+    document.getElementById('status').textContent = `Selected spine ${spineId} at ${tp} (row ${row || 'a'})`;
+    updateHeaders(); updateFateBars();
+    await refreshAll();
+  } catch(err) { document.getElementById('status').textContent = String(err.message||err); }
+}
+
+async function addManualSpineClick(tp, cv, e, row) {
+  if (!S.t1SpineIds.length) {
+    document.getElementById('status').textContent = 'Click "Load animal" first and wait for the spine queue.';
+    return;
+  }
+  const b = panelBounds(cv);
+  if (!b) {
+    document.getElementById('status').textContent = 'Panel not ready — wait for images to load, then click again.';
+    return;
+  }
+  const { sx, sy } = stackFromClick(cv, e, b);
+  pushUndo();
+  document.getElementById('status').textContent = `Adding manual spine at ${tp} (${sx.toFixed(0)}, ${sy.toFixed(0)})…`;
+  try {
+    const body = { timepoint: tp, stack_x: sx, stack_y: sy, z_plane: S.fovZ[tp] ?? null };
+    if (row) body.lineage_row = row;
+    const res = await api('/mtp/viewer/add-manual-spine', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(body)
+    });
+    applyPositionsResponse(res);
+    S.fovCenter[tp] = { x: sx, y: sy };
+    S.zoomCenter[tp] = { x: sx, y: sy };
+    setAddSpineMode(false);
+    document.getElementById('status').textContent = res.message || 'Manual spine added.';
+    if (tp === S.timepoints[0]) fillSpinePick();
+    updateHeaders(); updateFateBars();
+    await refreshAll();
+  } catch(err) {
+    const msg = String(err.message || err);
+    document.getElementById('status').textContent = msg.includes('Not Found')
+      ? 'Add failed: server missing add-manual-spine route — close and restart start_annotator.bat, then F5.'
+      : 'Add failed: ' + msg;
+    console.error(err);
+  }
+}
+
+async function clickPanel(tp, cv, e, row) {
+  let b = panelBounds(cv);
+  if (!b) {
+    try {
+      const st = await api('/mtp/viewer/state');
+      if (!st.timepoint_names || !st.timepoint_names.length) {
+        document.getElementById('status').textContent = 'Session expired — reloading…';
+        await loadAnimal();
+        return;
+      }
+    } catch (_) {}
+    document.getElementById('status').textContent = 'Panel not ready — wait for images to load, then click again.';
+    return;
+  }
+  const { sx, sy } = stackFromClick(cv, e, b);
+  pushUndo();
+  try {
+    const body = { timepoint: tp, stack_x: sx, stack_y: sy, z_plane: S.fovZ[tp] };
+    if (row) body.lineage_row = row;
+    const res = await api('/mtp/viewer/focus', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(body)
+    });
+    applyPositionsResponse(res);
+    const pmap = row === 'b' ? S.positionsB : S.positions;
+    const p = pmap[tp];
+    if (p && p.x != null) {
+      S.fovCenter[tp] = { x: p.x, y: p.y };
+      S.zoomCenter[tp] = { x: p.x, y: p.y };
+    } else {
+      S.fovCenter[tp] = { x: sx, y: sy };
+      S.zoomCenter[tp] = { x: sx, y: sy };
+    }
+    updateHeaders(); updateFateBars();
+    await refreshZoom(tp); await refreshFov(tp);
+  } catch(err) { showPanelError(err); }
+}
+
+function panFov(tp, dxPix, dyPix) {
+  const cv = document.getElementById('cf_'+esc(tp));
+  const b = cv?._bounds;
+  const c = S.fovCenter[tp] || S.positions[tp];
+  if (!b || !c || !cv) return;
+  const scaleX = (b.x1 - b.x0) / cv.clientWidth;
+  const scaleY = (b.y1 - b.y0) / cv.clientHeight;
+  S.fovCenter[tp] = { x: c.x + dxPix * scaleX, y: c.y + dyPix * scaleY };
+  refreshFov(tp);
+}
+
+function panZoom(tp, dxPix, dyPix) {
+  const cv = document.getElementById('cz_'+esc(tp));
+  const b = cv?._bounds;
+  const c = S.zoomCenter[tp] || S.positions[tp];
+  if (!b || !c || !cv) return;
+  const scaleX = (b.x1 - b.x0) / cv.clientWidth;
+  const scaleY = (b.y1 - b.y0) / cv.clientHeight;
+  S.zoomCenter[tp] = { x: c.x + dxPix * scaleX, y: c.y + dyPix * scaleY };
+  refreshZoom(tp);
+}
+
+function conflictHeaderText(tp) {
+  const pA = S.positions[tp];
+  const pB = S.positionsB[tp];
+  const conf = S.conflict || {};
+  const confSid = conf.spine_id || (S.t1SpineIds[S.idx] || '').split('|')[1] || '';
+  const dupTp = conf.timepoint || '';
+  const fmt = (row, p) => {
+    if (!p || !p.spine_id) return `${row}: —`;
+    const loc = p.local_spine_id ? `loc ${p.local_spine_id} · ` : '';
+    return `${row}: ${loc}${p.spine_id}`;
+  };
+  let s = `${fmt('A', pA)}  |  ${fmt('B', pB)}`;
+  if (confSid && dupTp && dupTp !== tp) {
+    s = `compare here · dup ${confSid} @ ${dupTp} — ${s}`;
+  } else if (confSid) {
+    s = `dup ${confSid} — ${s}`;
+  }
+  return s;
+}
+
+function scrollConflictTpIntoView() {
+  const tp = S.conflictTp;
+  if (!tp) return;
+  const i = S.timepoints.indexOf(tp);
+  if (i < 0) return;
+  const col = document.querySelector('#zoomRow .col:nth-child(' + (i + 1) + ')');
+  if (col) col.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
+}
+
+function panelCoords(tp) {
+  const p = S.positions[tp];
+  const zc = S.zoomCenter[tp] || S.fovCenter[tp];
+  const pre = S.positions[S.timepoints[0]];
+  const x = zc?.x ?? p?.x ?? pre?.x;
+  const y = zc?.y ?? p?.y ?? pre?.y;
+  const z = S.fovZ[tp] ?? p?.z ?? pre?.z ?? 0;
+  if (x == null || y == null) return null;
+  return { x, y, z, anchor_x: p?.x ?? x, anchor_y: p?.y ?? y };
+}
+
+async function refreshZoom(tp) {
+  const c = panelCoords(tp);
+  if (!c) return;
+  const zc = S.zoomCenter[tp] || { x: c.x, y: c.y };
+  const z = S.fovZ[tp] ?? Math.round(c.z);
+  const body = {
+    timepoint: tp, mode:'zoom', x:zc.x, y:zc.y, z:c.z, z_plane:z,
+    zoom_size: conflictZoomSize('a', tp),
+    anchor_x: c.anchor_x, anchor_y: c.anchor_y
+  };
+  if (S.phaseKind === 'duplicate') body.lineage_row = 'a';
+  try {
+    const data = await api('/mtp/viewer/panel', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(body)
+    });
+    drawCanvas('cz_'+esc(tp), data, tp, 'zoom');
+    if (data.z_max != null) S.fovZMax[tp] = data.z_max;
+    if (S.phaseKind === 'duplicate') {
+      const el = document.querySelector('#zh_'+esc(tp)+' .meta');
+      if (el) {
+        const zmax = data.z_max ?? S.fovZMax[tp] ?? '?';
+        const nav = `Z ${data.z_plane}/${zmax} · zoom ${conflictZoomSize('a', tp)}px · drag=pan · wheel=zoom · Shift+wheel=Z`;
+        el.textContent = tp === S.conflictTp ? `${conflictHeaderText(tp)} · ${nav}` : nav;
+      }
+    }
+  } catch (err) {
+    showPanelError(err);
+    throw err;
+  }
+}
+
+async function refreshFov(tp) {
+  if (S.phaseKind === 'duplicate') {
+    await refreshLineageB(tp);
+    return;
+  }
+  const c = panelCoords(tp);
+  if (!c) return;
+  const fc = S.fovCenter[tp] || { x: c.x, y: c.y };
+  const z = S.fovZ[tp] ?? Math.round(c.z);
+  try {
+    const data = await api('/mtp/viewer/panel', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        timepoint: tp, mode:'fov', x:fc.x, y:fc.y, z:c.z, z_plane:z,
+        view_width: 380, view_height: 280, fov_span: fovSpanFor(tp)
+      })
+    });
+    drawCanvas('cf_'+esc(tp), data, tp, 'fov');
+    S.fovZMax[tp] = data.z_max;
+    const span = Math.round(fovSpanFor(tp));
+    document.querySelector('#fh_'+esc(tp)+' .meta').textContent =
+      `Z ${data.z_plane}/${data.z_max} · span ${span}px · wheel=zoom · Shift+wheel=Z`;
+  } catch (err) {
+    showPanelError(err);
+    throw err;
+  }
+}
+
+function panelCoordsB(tp) {
+  const p = S.positionsB[tp];
+  const pre = S.positions[S.timepoints[0]];
+  const zc = S.fovCenter[tp];
+  const x = zc?.x ?? p?.x ?? pre?.x;
+  const y = zc?.y ?? p?.y ?? pre?.y;
+  const z = S.fovZ[tp] ?? p?.z ?? pre?.z ?? 0;
+  if (x == null || y == null) return null;
+  return {
+    x,
+    y,
+    z,
+    anchor_x: p?.x ?? x,
+    anchor_y: p?.y ?? y,
+  };
+}
+
+function updateHeadersB() {
+  if (S.phaseKind === 'duplicate') return;
+  S.timepoints.forEach(tp => {
+    const p = S.positionsB[tp];
+    const el = document.querySelector('#fh_'+esc(tp)+' .meta');
+    if (!el) return;
+    if (!p) { el.textContent = '—'; return; }
+    const sid = p.spine_id ? 'spine '+p.spine_id : (p.fate ? p.fate.toUpperCase() : '—');
+    el.textContent = `${sid} · ${p.source||'saved'}`;
+  });
+}
+
+async function refreshLineageB(tp) {
+  const c = panelCoordsB(tp);
+  if (!c) return;
+  const fc = S.fovCenter[tp] || { x: c.x, y: c.y };
+  const z = S.fovZ[tp] ?? Math.round(c.z ?? 0);
+  try {
+    const data = await api('/mtp/viewer/panel', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        timepoint: tp, mode:'zoom', lineage_row:'b',
+        x:fc.x, y:fc.y, z:c.z, z_plane:z,
+        zoom_size: conflictZoomSize('b', tp),
+        anchor_x: c.anchor_x, anchor_y: c.anchor_y
+      })
+    });
+    drawCanvas('cf_'+esc(tp), data, tp, 'fov');
+    if (data.z_max != null) S.fovZMax[tp] = data.z_max;
+    const el = document.querySelector('#fh_'+esc(tp)+' .meta');
+    if (el && S.phaseKind === 'duplicate') {
+      const zmax = data.z_max ?? S.fovZMax[tp] ?? '?';
+      const nav = `Z ${data.z_plane}/${zmax} · zoom ${conflictZoomSize('b', tp)}px · drag=pan · wheel=zoom · Shift+wheel=Z`;
+      el.textContent = tp === S.conflictTp ? `${conflictHeaderText(tp)} · ${nav}` : nav;
+    }
+  } catch (err) {
+    showPanelError(err);
+    throw err;
+  }
+}
+
+function updateHeaders() {
+  S.timepoints.forEach(tp => {
+    const p = S.positions[tp];
+    const el = document.querySelector('#zh_'+esc(tp)+' .meta');
+    if (!el || !p) return;
+    if (S.phaseKind === 'duplicate' && tp === S.conflictTp) {
+      el.textContent = conflictHeaderText(tp);
+      return;
+    }
+    const sid = p.spine_id ? 'spine '+p.spine_id : (p.fate ? p.fate.toUpperCase() : 'region');
+    const sc = p.score != null ? ' · score '+Number(p.score).toFixed(3) : '';
+    el.textContent = `${sid} · ${p.source||''}${sc}`;
+  });
+}
+
+function fateLabel(f, p) {
+  if (f === 'artifact') return 'ARTIFACT (blind spot)';
+  if (f === 'ignore') return 'IGNORE (single-TP · focus/tracking)';
+  if (f === 'new') return 'NEW';
+  if (f === 'lost') return 'LOST';
+  return f.toUpperCase();
+}
+
+function localFateNote(p) {
+  if (p.decision_scope !== 'local' && p.source !== 'single_tp_focus_tracking') return '';
+  if (p.fate === 'ignore' || p.source === 'single_tp_focus_tracking') {
+    return '<span style="color:#0369a1;font-size:10px">Single-TP only (focus/tracking elsewhere)</span>';
+  }
+  if (p.fate === 'artifact') {
+    return '<span style="color:#b45309;font-size:10px">Local artifact (this TP only)</span>';
+  }
+  if (p.fate === 'new') {
+    return '<span style="color:#059669;font-size:10px">Local new (this TP only)</span>';
+  }
+  if (p.fate === 'lost') {
+    return '<span style="color:#7c3aed;font-size:10px">Local lost (this TP only)</span>';
+  }
+  return '';
+}
+
+function activePositions() {
+  if (S.phaseKind === 'duplicate' && S.conflictFocus === 'b') return S.positionsB;
+  return S.positions;
+}
+
+function applyPositionsResponse(res) {
+  if (res.positions) S.positions = res.positions;
+  if (res.positions_b) S.positionsB = res.positions_b;
+  if (res.phase_kind) S.phaseKind = res.phase_kind;
+  if (res.lineage_a_key) S.lineageAKey = res.lineage_a_key;
+  if (res.lineage_b_key) S.lineageBKey = res.lineage_b_key;
+}
+
+function updateConflictFateBarVisibility() {
+  const on = S.phaseKind === 'duplicate';
+  S.timepoints.forEach(tp => {
+    const barA = document.getElementById('fateA_'+esc(tp));
+    if (barA) barA.style.display = on ? 'flex' : 'none';
+  });
+}
+
+function renderOneFateBar(tp, row, posMap, barId, isFocusRow) {
+  const bar = document.getElementById(barId);
+  const p = posMap[tp];
+  if (!bar) return;
+  if (!p) { bar.innerHTML = '—'; return; }
+  const lineageMode = S.reviewMode !== 'timepoint';
+  const activeTp = S.phaseKind === 'duplicate'
+    ? (S.conflictTp || S.anchorTp || S.timepoints[0] || '')
+    : (S.anchorTp || S.timepoints[0] || '');
+  bar.className = 'fate-bar' + (p.fate_locked ? ' locked' : '') + (isFocusRow ? ' fate-row-focus' : '');
+  const sid = p.spine_id ? `<span class="sid">spine ${p.spine_id}</span>` : '<span class="sid">— no match —</span>';
+  const rowTag = `<span style="color:var(--muted);font-size:10px;margin-right:4px">[${row}]</span>`;
+  let fateCls = 'fate-tag';
+  if (p.artifact_mode === 'blind_spot' || p.source === 'blind_spot_artifact' || p.source === 'local_artifact') fateCls += ' blind';
+  if (p.artifact_mode === 'false_positive' || String(p.source||'').startsWith('false_positive_')) fateCls += ' fp';
+  const fate = p.fate ? `<span class="${fateCls}">${p.fate.toUpperCase()}</span>` : '';
+  const fpPending = p.artifact_mode === 'false_positive' || String(p.source||'').startsWith('false_positive_');
+  const fpEligible = !!p.false_positive_eligible;
+  const localNote = localFateNote(p);
+  const rowArg = `'${row}'`;
+  if (p.spine_id) {
+    const fpBtns = fpEligible
+      ? `<button class="fp-btn" onclick="setConflictFocus(${rowArg});tagFalsePositive('${tp}','artifact',${rowArg})" title="Algorithm mistake — no spine here">False + (Artifact)</button>
+        <button class="fp-btn" onclick="setConflictFocus(${rowArg});tagFalsePositive('${tp}','ignore',${rowArg})" title="Lone detection — not a lineage">False + (Ignore)</button>`
+      : '';
+    bar.innerHTML = `${rowTag}${sid} ${fate} ${localNote}
+        ${fpBtns}
+        <button onclick="setConflictFocus(${rowArg});clearTp('${tp}',${rowArg})" style="font-size:10px;padding:3px 6px">Clear</button>`;
+    return;
+  }
+  if (fpPending) {
+    const fpLabel = (p.fate === 'ignore' || String(p.source||'').includes('ignore'))
+      ? 'Lone detection marked ignore'
+      : 'Algorithm artifact — no real spine here';
+    bar.innerHTML = `${rowTag}${sid} ${fate}
+        <span style="color:var(--muted);font-size:10px">${fpLabel}</span>
+        <button onclick="setConflictFocus(${rowArg});clearTp('${tp}',${rowArg})" style="font-size:10px;padding:3px 6px">Undo</button>`;
+    return;
+  }
+  if (lineageMode) {
+    bar.innerHTML = `${rowTag}${sid} ${fate} ${localNote}
+        <span style="color:var(--muted);font-size:10px">Clear → infer new/lost on save</span>
+        <button onclick="setConflictFocus(${rowArg});clearTp('${tp}',${rowArg})" style="font-size:10px;padding:3px 6px">Clear</button>`;
+    return;
+  }
+  const isActive = tp === activeTp;
+  const tpFateOpts = (isActive && !p.spine_id && !p.fate_locked)
+    ? ['artifact', 'ignore', 'new', 'lost']
+    : (p.fate_options || []);
+  let opts = '<option value="">— fate —</option>';
+  tpFateOpts.forEach(f => {
+    opts += `<option value="${f}"${p.fate===f?' selected':''}>${fateLabel(f, p)}</option>`;
+  });
+  const show = isActive && !p.spine_id && !p.fate_locked;
+  const lockNote = p.fate_locked ? ' title="Blocked — lineage LOST at previous timepoint"' : '';
+  const shortcutHint = isActive
+    ? '<span style="color:#5b21b6;font-size:10px">A artifact · I single-TP · N new · L lost</span>'
+    : '';
+  bar.innerHTML = `${rowTag}${sid} ${fate} ${localNote}
+      <select id="fsel_${row}_${esc(tp)}" onchange="setConflictFocus(${rowArg});onFateChange('${tp}',${rowArg})" ${show && !p.fate_locked ? '' : 'style="display:none"'}${lockNote}>${opts}</select>
+      ${shortcutHint}
+      <button onclick="setConflictFocus(${rowArg});clearTp('${tp}',${rowArg})" style="font-size:10px;padding:3px 6px">Clear</button>`;
+  if (p.fate_locked && !p.fate) {
+    bar.innerHTML += '<span style="color:var(--muted);font-size:10px">Lineage lost after previous TP</span>';
+  }
+}
+
+function updateFateBars() {
+  updateConflictFateBarVisibility();
+  if (S.phaseKind === 'duplicate') {
+    S.timepoints.forEach(tp => {
+      renderOneFateBar(tp, 'A', S.positions, 'fateA_'+esc(tp), S.conflictFocus === 'a');
+      renderOneFateBar(tp, 'B', S.positionsB, 'fate_'+esc(tp), S.conflictFocus === 'b');
+    });
+    return;
+  }
+  const lineageMode = S.reviewMode !== 'timepoint';
+  const activeTp = S.anchorTp || S.timepoints[0] || '';
+  const posMap = S.positions;
+  S.timepoints.forEach(tp => {
+    const bar = document.getElementById('fate_'+esc(tp));
+    const p = posMap[tp];
+    if (!bar || !p) return;
+    bar.className = 'fate-bar' + (p.fate_locked ? ' locked' : '');
+    const sid = p.spine_id ? `<span class="sid">spine ${p.spine_id}</span>` : '<span class="sid">— no match —</span>';
+    const rowTag = '';
+    let fateCls = 'fate-tag';
+    if (p.artifact_mode === 'blind_spot' || p.source === 'blind_spot_artifact' || p.source === 'local_artifact') fateCls += ' blind';
+    if (p.artifact_mode === 'false_positive' || String(p.source||'').startsWith('false_positive_')) fateCls += ' fp';
+    const fate = p.fate ? `<span class="${fateCls}">${p.fate.toUpperCase()}</span>` : '';
+    const fpPending = p.artifact_mode === 'false_positive' || String(p.source||'').startsWith('false_positive_');
+    const fpEligible = !!p.false_positive_eligible;
+    const localNote = localFateNote(p);
+    if (p.spine_id) {
+      const fpBtns = fpEligible
+        ? `<button class="fp-btn" onclick="tagFalsePositive('${tp}','artifact')" title="Algorithm mistake — no spine here">False + (Artifact)</button>
+        <button class="fp-btn" onclick="tagFalsePositive('${tp}','ignore')" title="Lone detection — not a lineage">False + (Ignore)</button>`
+        : '';
+      bar.innerHTML = `${rowTag}${sid} ${fate} ${localNote}
+        ${fpBtns}
+        <button onclick="clearTp('${tp}')" style="font-size:10px;padding:3px 6px">Clear</button>`;
+      return;
+    }
+    if (fpPending) {
+      const fpLabel = (p.fate === 'ignore' || String(p.source||'').includes('ignore'))
+        ? 'Lone detection marked ignore'
+        : 'Algorithm artifact — no real spine here';
+      bar.innerHTML = `${rowTag}${sid} ${fate}
+        <span style="color:var(--muted);font-size:10px">${fpLabel}</span>
+        <button onclick="clearTp('${tp}')" style="font-size:10px;padding:3px 6px">Undo</button>`;
+      return;
+    }
+    if (lineageMode) {
+      bar.innerHTML = `${rowTag}${sid} ${fate} ${localNote}
+        <span style="color:var(--muted);font-size:10px">Clear → infer new/lost on save</span>
+        <button onclick="clearTp('${tp}')" style="font-size:10px;padding:3px 6px">Clear</button>`;
+      return;
+    }
+    const isActive = tp === activeTp;
+    const tpFateOpts = (isActive && !p.spine_id && !p.fate_locked)
+      ? ['artifact', 'ignore', 'new', 'lost']
+      : (p.fate_options || []);
+    let opts = '<option value="">— fate —</option>';
+    tpFateOpts.forEach(f => {
+      opts += `<option value="${f}"${p.fate===f?' selected':''}>${fateLabel(f, p)}</option>`;
+    });
+    const show = isActive && !p.spine_id && !p.fate_locked;
+    const lockNote = p.fate_locked ? ' title="Blocked — lineage LOST at previous timepoint"' : '';
+    const shortcutHint = isActive
+      ? '<span style="color:#5b21b6;font-size:10px">A artifact · I single-TP · N new · L lost</span>'
+      : '';
+    bar.innerHTML = `${rowTag}${sid} ${fate} ${localNote}
+      <select id="fsel_${esc(tp)}" onchange="onFateChange('${tp}')" ${show && !p.fate_locked ? '' : 'style="display:none"'}${lockNote}>${opts}</select>
+      ${shortcutHint}
+      <button onclick="clearTp('${tp}')" style="font-size:10px;padding:3px 6px">Clear</button>`;
+    if (p.fate_locked && !p.fate) {
+      bar.innerHTML += '<span style="color:var(--muted);font-size:10px">Lineage lost after previous TP</span>';
+    }
+  });
+}
+
+async function tagFalsePositive(tp, tag, row) {
+  pushUndo();
+  const body = { timepoint: tp, tag };
+  if (row) body.lineage_row = row;
+  try {
+    const res = await api('/mtp/viewer/tag-false-positive', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(body)
+    });
+    applyPositionsResponse(res);
+    document.getElementById('status').textContent = res.message || `False positive (${tag}) at ${tp}`;
+    updateHeaders(); updateFateBars();
+    await refreshAll();
+  } catch(err) { document.getElementById('status').textContent = String(err.message||err); }
+}
+
+async function onFateChange(tp, row) {
+  const r = row ? String(row).toLowerCase() : '';
+  const sel = (r && document.getElementById('fsel_'+esc(r)+'_'+esc(tp)))
+    || document.getElementById('fsel_'+esc(tp));
+  const fate = sel ? sel.value : '';
+  await setLocalFate(tp, fate, r || undefined);
+}
+
+async function ignoreAllTpsLineage() {
+  if (S.reviewMode !== 'lineage') {
+    document.getElementById('status').textContent = 'Ignore-all is for lineage mode (Tab → I). In timepoint mode, I applies to the anchor only.';
+    return;
+  }
+  if (S.fateBusy) return;
+  S.fateBusy = true;
+  pushUndo();
+  try {
+    const res = await api('/mtp/viewer/set-fate-all-tps', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ fate: 'ignore', review_mode: S.reviewMode })
+    });
+    S.positions = res.positions;
+    document.getElementById('status').textContent =
+      `${res.message || 'IGNORE on all timepoints'} · loading next spine…`;
+    await nextSpine();
+  } catch(err) {
+    document.getElementById('status').textContent = String(err.message||err);
+  } finally {
+    S.fateBusy = false;
+  }
+}
+
+async function setLocalFate(tp, fate, row) {
+  if (S.reviewMode !== 'timepoint') {
+    document.getElementById('status').textContent = 'Switch to timepoint mode first (S or the mode button).';
+    return;
+  }
+  const bodyBase = { timepoint: tp, review_mode: S.reviewMode };
+  if (row) bodyBase.lineage_row = String(row).toLowerCase();
+  if (!fate) {
+    pushUndo();
+    try {
+      const res = await api('/mtp/viewer/set-fate', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ ...bodyBase, fate: '' })
+      });
+      applyPositionsResponse(res);
+      updateHeaders(); updateFateBars();
+    } catch(err) { document.getElementById('status').textContent = String(err.message||err); }
+    return;
+  }
+  if (S.fateBusy) return;
+  S.fateBusy = true;
+  pushUndo();
+  try {
+    const res = await api('/mtp/viewer/set-fate', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ ...bodyBase, fate })
+    });
+    applyPositionsResponse(res);
+    updateHeaders();
+    updateFateBars();
+    await refreshAll();
+    document.getElementById('status').textContent =
+      `${(fate || '').toUpperCase()} at ${tp} only — other timepoints returned to matching pool. Keep A/B saves to CSV.`;
+  } catch(err) {
+    document.getElementById('status').textContent = String(err.message||err);
+  } finally {
+    S.fateBusy = false;
+  }
+}
+
+function ensureLineageMode() {
+  if (S.phaseKind === 'duplicate') {
+    updatePhaseBadge();
+    updateFateBars();
+    return;
+  }
+  S.reviewMode = 'lineage';
+  updatePhaseBadge();
+  updateFateBars();
+  api('/mtp/viewer/review-mode', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ mode: 'lineage' }),
+  }).catch(() => {});
+}
+
+function reviewModeStatusText() {
+  const anchor = S.anchorTp || S.timepoints[0] || '';
+  return S.reviewMode === 'timepoint'
+    ? `Timepoint mode (${anchor}) · A/I/N/L on physical keys (same as English layout)`
+    : 'Lineage mode · Clear empty TPs → infer new/lost on save';
+}
+
+function toggleReviewMode() {
+  S.reviewMode = S.reviewMode === 'timepoint' ? 'lineage' : 'timepoint';
+  updatePhaseBadge();
+  updateFateBars();
+  document.getElementById('status').textContent = reviewModeStatusText();
+  api('/mtp/viewer/review-mode', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ mode: S.reviewMode }),
+  }).then(res => {
+    if (res.review_mode) S.reviewMode = res.review_mode;
+    if (res.positions) S.positions = res.positions;
+    updatePhaseBadge();
+    updateFateBars();
+    if (res.message) document.getElementById('status').textContent = res.message;
+  }).catch(() => { /* client mode works without server sync */ });
+}
+
+async function clearTp(tp, row) {
+  pushUndo();
+  const body = { timepoint: tp };
+  if (row) body.lineage_row = String(row).toLowerCase();
+  try {
+    const res = await api('/mtp/viewer/clear-tp', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(body)
+    });
+    applyPositionsResponse(res);
+    updateHeaders(); updateFateBars();
+    await refreshAll();
+  } catch(err) { document.getElementById('status').textContent = String(err.message||err); }
+}
+
+async function clearAllTps(skipConfirm) {
+  if (!skipConfirm && !confirm('Clear all timepoints for this spine? (no fate labels)')) return;
+  if (!_STATE_hasActive() || S.reviewComplete) return;
+  pushUndo();
+  try {
+    const body = {};
+    if (S.phaseKind === 'duplicate') body.lineage_row = S.conflictFocus;
+    const res = await api('/mtp/viewer/clear-all-tps', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(body)
+    });
+    applyPositionsResponse(res);
+    document.getElementById('status').textContent = res.message || 'All timepoints cleared.';
+    updateHeaders(); updateFateBars();
+    await refreshAll();
+  } catch(err) { document.getElementById('status').textContent = String(err.message||err); }
+}
+
+function textInputFocused() {
+  const el = document.activeElement;
+  if (!el || el.tagName !== 'INPUT') return false;
+  const t = (el.type || 'text').toLowerCase();
+  return t === 'text' || t === 'password' || t === 'search' || t === 'email';
+}
+
+function onViewerKeydown(e) {
+  if (e.ctrlKey || e.altKey || e.metaKey) return;
+  if (e.code === 'KeyS') {
+    if (textInputFocused()) return;
+    e.preventDefault();
+    e.stopPropagation();
+    toggleReviewMode();
+    return;
+  }
+  if (e.code === 'Tab' && !e.shiftKey) {
+    if (textInputFocused()) return;
+    e.preventDefault();
+    if (S.reviewMode === 'timepoint') {
+      const tp = S.anchorTp || S.timepoints[0];
+      if (tp) clearTp(tp);
+    } else {
+      clearAllTps(true);
+    }
+    return;
+  }
+  if (e.code === 'KeyI') {
+    if (textInputFocused() || S.reviewComplete) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (S.reviewMode === 'lineage') {
+      ignoreAllTpsLineage();
+    } else {
+      const tp = S.anchorTp || S.timepoints[0];
+      if (tp) setLocalFate(tp, 'ignore');
+    }
+    return;
+  }
+  if (S.reviewMode !== 'timepoint' || S.reviewComplete) return;
+  const tp = S.anchorTp || S.timepoints[0];
+  if (!tp) return;
+  const fateByCode = { KeyA: 'artifact', KeyN: 'new', KeyL: 'lost' };
+  const fate = fateByCode[e.code];
+  if (!fate) return;
+  if (textInputFocused()) return;
+  e.preventDefault();
+  e.stopPropagation();
+  setLocalFate(tp, fate);
+}
+
+function setAddSpineMode(on) {
+  S.addSpineMode = !!on;
+  if (S.addSpineMode) {
+    S.oofMode = false;
+    document.getElementById('oofBtn').classList.remove('active-oof');
+    document.getElementById('oofBtn').textContent = 'Mark OOF segment';
+  }
+  const btn = document.getElementById('addSpineBtn');
+  btn.classList.toggle('active-add', S.addSpineMode);
+  btn.textContent = S.addSpineMode ? 'Force add ON' : 'Force add spine';
+}
+
+function toggleAddSpineMode() {
+  setAddSpineMode(!S.addSpineMode);
+  document.getElementById('status').textContent = S.addSpineMode
+    ? 'Force-add mode: every click creates a new manual spine (even on existing labels).'
+    : 'Click spine label to select · Lineage: Clear → infer on save · S = timepoint mode (A/I/N/L)';
+}
+
+function toggleOofMode() {
+  S.oofMode = !S.oofMode;
+  if (S.oofMode) {
+    setAddSpineMode(false);
+  }
+  const btn = document.getElementById('oofBtn');
+  btn.classList.toggle('active-oof', S.oofMode);
+  btn.textContent = S.oofMode ? 'OOF mode ON' : 'Mark OOF segment';
+  updateOofZoomUi();
+}
+
+function fillSpinePick() {
+  const sel = document.getElementById('spinePick');
+  sel.innerHTML = '';
+  const prefix = S.anchorTp ? `${S.anchorTp} ` : '';
+  S.t1SpineIds.forEach((id,i) => {
+    const m = S.queueMeta[id] || {};
+    const local = m.local_spine_id || m.local_pre_spine_id || id;
+    const sc = m.pre_mid_score != null ? ` · ${Number(m.pre_mid_score).toFixed(3)}` : '';
+    const mid = m.mid_spine_id ? ` → ${m.mid_spine_id}` : '';
+    let label = `${prefix}${local} (${id})${mid}${sc}`;
+    if (S.phaseKind === 'duplicate') {
+      const parts = String(id).split('|');
+      label = `conflict ${parts[1] || id} @ ${parts[0] || ''} · A=${m.lineage_a_key||'?'} B=${m.lineage_b_key||'?'}`;
+    } else if (S.phaseKind === 'unreviewed') {
+      const parts = String(id).split('|');
+      label = `${parts[0] || prefix} ${parts[1] || id} (unreviewed)`;
+    }
+    const o = document.createElement('option');
+    o.value = i;
+    o.textContent = label;
+    sel.appendChild(o);
+  });
+}
+
+async function toggleCrossMode() {
+  const next = S.queueMode === 'main' ? 'cross' : 'main';
+  const res = await api('/mtp/viewer/queue-mode', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({mode: next})
+  });
+  S.queueMode = res.queue_mode;
+  S.t1SpineIds = res.spine_ids || [];
+  const page = await api('/mtp/viewer/t1-spines?offset=0&limit=50000');
+  S.queueMeta = {};
+  page.items.forEach(x => { S.queueMeta[x.spine_id] = x; });
+  document.body.classList.toggle('cross-mode', S.queueMode === 'cross');
+  document.getElementById('crossBtn').textContent = S.queueMode === 'cross'
+    ? '← Back to linked matches' : `Cross-dendrite review (${S.crossCount})`;
+  fillSpinePick();
+  if (S.t1SpineIds.length) await selectSpineAt(0);
+}
+
+async function saveConflictEdits(row) {
+  const focusRow = row || (S.conflictFocus === 'b' ? 'b' : 'a');
+  try {
+    const res = await api('/mtp/viewer/save-conflict-edits', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ row: focusRow })
+    });
+    applyPositionsResponse(res);
+    if (res.registry_path) updateOutputPath(res.registry_path, res.registry_mtime);
+    document.getElementById('status').textContent = formatSaveStatus(res);
+    updateHeaders();
+    if (S.phaseKind === 'duplicate') updateHeadersB();
+    updateFateBars();
+    updateNavButtons();
+    await refreshAll();
+  } catch(err) {
+    const msg = String(err.message||err);
+    document.getElementById('status').textContent = msg.includes('Permission denied') || msg.includes('being used')
+      ? msg + ' — close spine_registry_wide.csv in Excel, then try again.'
+      : msg;
+  }
+}
+
+async function resolveConflict(keep) {
+  try {
+    const res = await api('/mtp/viewer/resolve-conflict', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ keep })
+    });
+    if (res.registry_path) updateOutputPath(res.registry_path, res.registry_mtime);
+    document.getElementById('status').textContent = formatSaveStatus(res);
+    if (res.review_complete) {
+      showReviewComplete(res);
+      return;
+    }
+    await applyQueueUpdate(res);
+    if (S.t1SpineIds.length) await selectSpineAt(0);
+    else showReviewComplete(res);
+  } catch(err) {
+    const msg = String(err.message||err);
+    document.getElementById('status').textContent = msg.includes('Permission denied') || msg.includes('being used')
+      ? msg + ' — close spine_registry_wide.csv in Excel, then try again.'
+      : msg;
+  }
+}
+
+async function refreshAll() {
+  updateHeaders();
+  if (S.phaseKind === 'duplicate') updateHeadersB();
+  updateFateBars();
+  const tasks = S.phaseKind === 'duplicate'
+    ? S.timepoints.flatMap(tp => [refreshZoom(tp), refreshLineageB(tp)])
+    : S.timepoints.flatMap(tp => [refreshZoom(tp), refreshFov(tp)]);
+  await Promise.all(tasks.map(p => p.catch(err => {
+    console.error('Panel refresh failed:', err);
+  })));
+}
+
+async function selectSpineAt(idx) {
+  if (!S.t1SpineIds.length) return;
+  if (S.reviewComplete) {
+    S.reviewComplete = false;
+    const banner = document.getElementById('completeBanner');
+    if (banner) banner.classList.remove('open');
+  }
+  ensureLineageMode();
+  clearUndo();
+  setAddSpineMode(false);
+  S.idx = Math.max(0, Math.min(idx, S.t1SpineIds.length-1));
+  const sid = S.t1SpineIds[S.idx];
+  document.getElementById('spinePick').value = String(S.idx);
+  document.getElementById('spineIdx').textContent = `${S.idx+1}/${S.t1SpineIds.length}${S.queueMode==='cross'?' (cross-dend)':''}${S.phaseKind==='duplicate'?' · conflicts':S.phaseKind==='unreviewed'?' · unreviewed':S.phaseIndex>0?' · orphan phase':''}`;
+  const res = await api('/mtp/viewer/select-spine', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ t1_spine_id: sid })
+  });
+  S.positions = res.positions;
+  S.positionsB = res.positions_b || {};
+  S.lineageAKey = res.lineage_a_key || '';
+  S.lineageBKey = res.lineage_b_key || '';
+  S.phaseKind = res.phase_kind || S.phaseKind;
+  S.conflict = (res.conflict && typeof res.conflict === 'object') ? res.conflict : {};
+  S.conflictTp = S.conflict.comparison_timepoint || S.conflict.timepoint || '';
+  S.conflictFocus = res.conflict_focus_row || 'a';
+  if (res.lineage_a_key) S.lineageAKey = res.lineage_a_key;
+  if (res.lineage_b_key) S.lineageBKey = res.lineage_b_key;
+  if (S.phaseKind !== 'duplicate') {
+    S.positionsB = res.positions_b || {};
+    if (!S.positionsB || !Object.keys(S.positionsB).length) S.positionsB = {};
+  }
+  if (res.coverage) S.coverage = res.coverage;
+  if (S.phaseKind === 'unreviewed') {
+    resetConflictUiIfNeeded();
+    if (res.anchor_timepoint) S.anchorTp = res.anchor_timepoint;
+  }
+  ensureLineageMode();
+  const ctp = S.conflictTp;
+  S.timepoints.forEach(tp => {
+    const p = res.positions[tp];
+    const pb = S.positionsB[tp];
+    if (S.phaseKind === 'duplicate') {
+      if (p?.x != null) S.zoomCenter[tp] = { x: p.x, y: p.y };
+      if (pb?.x != null) S.fovCenter[tp] = { x: pb.x, y: pb.y };
+      else if (p?.x != null) S.fovCenter[tp] = { x: p.x, y: p.y };
+      S.fovZ[tp] = Math.round((p?.z ?? pb?.z) ?? 0);
+      return;
+    }
+    if (p && p.x != null) {
+      S.fovCenter[tp] = { x: p.x, y: p.y };
+      S.zoomCenter[tp] = { x: p.x, y: p.y };
+    }
+    S.fovZ[tp] = Math.round((p && p.z != null ? p.z : pb?.z) ?? 0);
+  });
+  const sc = res.pre_mid_score != null ? `pre→mid ${Number(res.pre_mid_score).toFixed(3)}` : '';
+  document.getElementById('scoreBadge').textContent = sc + (res.cross_dendrite ? ' · CROSS-DENDRITE' : '');
+  const regBadge = document.getElementById('regBadge');
+  regBadge.style.display = res.local_registration ? 'inline' : 'none';
+  regBadge.textContent = res.local_registration ? 'Local reg ON' : '';
+  document.getElementById('status').textContent =
+    `${S.anchorTp || 'pre'} ${sid}${res.mid_spine_id ? ' → '+res.mid_spine_id : ''}${sc ? ' · '+sc : ''}`;
+  S.phaseIndex = res.phase_index ?? S.phaseIndex;
+  S.anchorTp = res.anchor_timepoint || S.anchorTp;
+  updatePhaseBadge();
+  updateNavButtons();
+  updateConflictUi();
+  await refreshAll();
+  if (S.phaseKind === 'duplicate') scrollConflictTpIntoView();
+}
+
+function resetConflictUiIfNeeded() {
+  if (S.phaseKind === 'duplicate') return;
+  S.positionsB = {};
+  S.conflict = {};
+  S.conflictTp = '';
+  S.lineageAKey = '';
+  S.lineageBKey = '';
+  updateConflictUi();
+  updateConflictFateBarVisibility();
+}
+
+async function applyQueueUpdate(res) {
+  if (res.spine_ids) S.t1SpineIds = res.spine_ids;
+  if (res.phase_index != null) S.phaseIndex = res.phase_index;
+  if (res.anchor_timepoint) S.anchorTp = res.anchor_timepoint;
+  if (res.phase_kind) S.phaseKind = res.phase_kind;
+  if (res.coverage) S.coverage = res.coverage;
+  resetConflictUiIfNeeded();
+  const page = await api('/mtp/viewer/t1-spines?offset=0&limit=50000');
+  S.queueMeta = {};
+  page.items.forEach(x => { S.queueMeta[x.spine_id] = x; });
+  fillSpinePick();
+  ensureLineageMode();
+  updateNavButtons();
+}
+
+async function prevSpine() {
+  if (S.idx > 0) await selectSpineAt(S.idx - 1);
+}
+
+async function nextSpine() {
+  if (!_STATE_hasActive()) return;
+  if (S.phaseKind === 'duplicate') {
+    await saveConflictEdits();
+    return;
+  }
+  if (S.reviewComplete) {
+    S.reviewComplete = false;
+    const banner = document.getElementById('completeBanner');
+    if (banner) banner.classList.remove('open');
+  }
+  ensureLineageMode();
+  clearUndo();
+  let res;
+  try {
+    res = await api('/mtp/viewer/confirm-lineage', { method:'POST' });
+  } catch(err) {
+    const msg = String(err.message || err);
+    document.getElementById('status').textContent = msg.includes('Permission denied') || msg.includes('being used')
+      ? msg + ' — close spine_registry_wide.csv in Excel, then Save again.'
+      : msg;
+    return;
+  }
+  if (res.registry_path) updateOutputPath(res.registry_path, res.registry_mtime);
+  document.getElementById('status').textContent = formatSaveStatus(res);
+  ensureLineageMode();
+  if (res.review_complete) {
+    showReviewComplete(res);
+    return;
+  }
+  if (res.phase_advanced) {
+    await applyQueueUpdate(res);
+    if (S.t1SpineIds.length) {
+      document.getElementById('status').textContent = res.message || 'Next phase started.';
+      await selectSpineAt(0);
+      return;
+    }
+    showReviewComplete(res);
+    return;
+  }
+  if (S.idx < S.t1SpineIds.length - 1) await selectSpineAt(S.idx + 1);
+  else {
+    ensureLineageMode();
+    updateNavButtons();
+  }
+}
+
+function _STATE_hasActive() { return S.t1SpineIds.length > 0; }
+
+let TP_CATALOG = [];
+
+async function loadTpCatalog(fov) {
+  const inv = await api('/animal/inventory?fov=' + encodeURIComponent(fov));
+  TP_CATALOG = inv.timepoint_catalog || [];
+  renderTpPick();
+}
+
+function renderTpPick() {
+  const el = document.getElementById('tpPick');
+  if (!el) return;
+  if (!TP_CATALOG.length) { el.innerHTML = ''; return; }
+  const boxes = TP_CATALOG.map(tp => {
+    const dis = tp.has_csv ? '' : ' disabled';
+    const chk = tp.selected && tp.has_csv ? ' checked' : '';
+    const tag = tp.has_csv ? ' ('+tp.spine_count+' spines)' : ' (no CSV)';
+    return '<label style="margin-right:12px;white-space:nowrap"><input type="checkbox" class="tp-chk" value="'+tp.name.replace(/"/g,'&quot;')+'"'+dis+chk+'> '+tp.name+tag+'</label>';
+  }).join('');
+  el.innerHTML = '<b>Active timepoints</b> — '+boxes;
+}
+
+function selectedTimepointsQuery() {
+  return [...document.querySelectorAll('.tp-chk:checked')].map(el => el.value).join(',');
+}
+
+function jumpSpine() { selectSpineAt(parseInt(document.getElementById('spinePick').value,10)||0); }
+
+async function loadAnimal() {
+  const statusEl = document.getElementById('status');
+  const setStatus = (t) => { if (statusEl) statusEl.textContent = t; };
+  try {
+    const fov = parseInt(document.getElementById('fov').value||'1',10);
+    const params = new URLSearchParams(window.location.search);
+    const linkId = params.get('link_id') || '';
+    setStatus('Loading — step 1/5: config…');
+    S.reviewComplete = false;
+    clearUndo();
+    const completeBanner = document.getElementById('completeBanner');
+    if (completeBanner) completeBanner.classList.remove('open');
+    const modeBadge = document.getElementById('modeBadge');
+    const linkBadge = document.getElementById('linkBadge');
+    if (linkId) {
+      if (linkBadge) { linkBadge.style.display = 'inline'; linkBadge.textContent = 'Link: ' + linkId; }
+      if (modeBadge) modeBadge.textContent = '';
+      document.body.classList.remove('global-mode');
+    } else {
+      if (linkBadge) linkBadge.style.display = 'none';
+      if (modeBadge) modeBadge.textContent = 'Global mode — all pre spines';
+      document.body.classList.add('global-mode');
+    }
+    const cfg = await api('/animal/config');
+    if (cfg.default_fov && !params.get('fov')) document.getElementById('fov').value = String(cfg.default_fov);
+    setStatus('Loading — step 2/5: timepoints…');
+    await loadTpCatalog(fov);
+    const tps = selectedTimepointsQuery();
+    let tpParam = params.get('timepoints') || tps;
+    if (!tpParam) {
+      tpParam = TP_CATALOG.filter(tp => tp.has_csv).map(tp => tp.name).join(',');
+    }
+    let url = '/mtp/viewer/load?fov='+fov;
+    if (linkId) url += '&link_id=' + encodeURIComponent(linkId);
+    if (tpParam) url += '&timepoints=' + encodeURIComponent(tpParam);
+    setStatus('Loading — step 3/5: reading FOV data from disk (E: can take 30–60s)…');
+    const load = await api(url, { method:'POST' }, 300000);
+    S.timepoints = load.timepoint_names || [];
+    S.phaseIndex = load.phase_index ?? 0;
+    S.phaseCount = load.phase_count ?? S.timepoints.length;
+    S.phaseKind = load.phase_kind || 'lineage';
+    S.coverage = load.coverage || {};
+    S.anchorTp = load.anchor_timepoint || S.timepoints[0] || '';
+    S.reviewMode = load.review_mode || 'lineage';
+    S.globalMode = load.global_mode !== false;
+    S.oofSegments = [];
+  // Show load result immediately — before slow UI/panel work
+    setStatus(load.message || 'Loaded.');
+    updateOutputPath(expectedRegistryPath(load), load.registry_mtime || load.decisions_mtime);
+    if (!S.timepoints.length) {
+      setStatus((load.message || 'Load failed') + ' — no timepoint CSVs found for this FOV.');
+      return;
+    }
+    buildColumns();
+    bindConflictRowClicks();
+    S.t1SpineIds = Array.isArray(load.spine_ids) && load.spine_ids.length
+      ? load.spine_ids.slice()
+      : [];
+    S.queueMeta = {};
+    setStatus('Loading — step 4/5: spine queue…');
+    const page = await api('/mtp/viewer/t1-spines?offset=0&limit=50000');
+    if (!S.t1SpineIds.length) S.t1SpineIds = page.items.map(x => x.spine_id);
+    page.items.forEach(x => { S.queueMeta[x.spine_id] = x; });
+    S.crossCount = load.cross_queue_count || 0;
+    const crossBtn = document.getElementById('crossBtn');
+    if (crossBtn) {
+      if (S.crossCount > 0) {
+        crossBtn.style.display = 'inline-block';
+        crossBtn.textContent = `Cross-dendrite review (${S.crossCount})`;
+      } else crossBtn.style.display = 'none';
+    }
+    fillSpinePick();
+    ensureLineageMode();
+    updatePhaseBadge();
+    updateNavButtons();
+    setStatus((load.message || 'Loaded.') + (S.t1SpineIds.length ? ` · ${S.t1SpineIds.length} in queue` : ''));
+    const oof = await api('/mtp/viewer/oof-segments');
+    S.oofSegments = oof.segments || [];
+    let startIdx = 0;
+    if (load.review_progress && load.review_progress.last_pre_spine_index != null) {
+      startIdx = Math.min(load.review_progress.last_pre_spine_index, Math.max(0, S.t1SpineIds.length-1));
+    }
+    if (S.t1SpineIds.length) {
+      setStatus('Loading — step 5/5: first spine images…');
+      try {
+        await selectSpineAt(startIdx);
+      } catch (panelErr) {
+        console.error('selectSpineAt failed:', panelErr);
+        setStatus(
+          (load.message || 'Loaded.') +
+          ` · spine ${startIdx + 1}/${S.t1SpineIds.length} — images failed: ${panelErr.message || panelErr}`
+        );
+      }
+    } else if (!maybeShowAlreadyComplete(load)) {
+      setStatus((load.message || 'Loaded.') + ' (no spines left in queue)');
+      updateNavButtons();
+    }
+  } catch(e) {
+    console.error('loadAnimal failed:', e);
+    setStatus('Load failed: ' + String(e.message||e));
+  }
+}
+
+(async function init(){
+  const statusEl = document.getElementById('status');
+  if (statusEl) statusEl.textContent = 'Initializing…';
+  window.addEventListener('error', (e) => {
+    const el = document.getElementById('status');
+    if (el && (el.textContent === 'Load a FOV to begin.' || el.textContent === 'Initializing…')) {
+      el.textContent = 'Page error: ' + (e.message || 'unknown');
+    }
+    console.error(e);
+  });
+  document.addEventListener('keydown', onViewerKeydown, true);
+  const params = new URLSearchParams(window.location.search);
+  if (params.get('fov')) document.getElementById('fov').value = params.get('fov');
+  try {
+    const cfg = await api('/animal/config');
+    if (cfg.default_fov && !params.get('fov')) document.getElementById('fov').value = String(cfg.default_fov);
+  } catch (e) {
+    console.warn('Config preload failed:', e);
+  }
+  try {
+    await loadAnimal();
+  } catch (e) {
+    const el = document.getElementById('status');
+    if (el) el.textContent = 'Init failed: ' + String(e.message || e);
+    console.error(e);
+  }
+})();
+</script>
+</body>
+</html>

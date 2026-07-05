@@ -1,0 +1,149 @@
+================================================================================
+SPINE MATCH OVERTIME — HOW TO WORK
+================================================================================
+
+Project location: D:\spine_match_overtime
+
+Folder layout:
+  config\     — settings file (animal, workspace, timepoints)
+  scripts\    — all application code (Python + backend)
+  results\    — local demo + app session state
+  docs\       — output field reference (CSV/JSON)
+
+================================================================================
+0. Global spine catalog (step 1 — automatic)
+================================================================================
+
+  On FOV load, the app builds or loads:
+    respan\_annotator\fovN\spine_catalog.csv
+
+  Every detection at every timepoint gets a unique ID: S_00001, S_00002, ...
+  Columns: global_spine_id, timepoint, local_spine_id (original CSV number)
+
+  Built automatically when you load a FOV (dendrite linker or spine tracker).
+
+  UI labels show local (S_*), e.g. 11 (S_00042).
+  Lineage saves use lineage_key = global S_* ID (no cross-timepoint collisions).
+
+================================================================================
+1. Quick start (demo)
+================================================================================
+
+  1. Run:  start_demo_annotator.bat
+  2. In the browser:
+       Dendrite linker:  http://127.0.0.1:8010/mtp/
+       Spine tracker:    http://127.0.0.1:8010/mtp/viewer/?fov=1
+
+  Demo data is written to: results\demo_spine_logic_lab\respan\
+
+================================================================================
+2. Working on a real animal
+================================================================================
+
+  1. Edit config\annotator.json:
+       animal_id       — identifier (e.g. GP04)
+       workspace       — your experiment folder (not respan!)
+       fovs            — list of FOVs
+       timepoint_order — chronological timepoint names
+
+  2. Run: start_annotator.bat
+
+  The app uses:
+       <workspace>\respan\
+  and creates any missing structure (Tables, fovNSwc, results, etc.).
+
+  Note: workspace can be an absolute path (E:/...) or relative to the project
+  (e.g. results/demo_spine_logic_lab).
+
+================================================================================
+3. Workflow (phases)
+================================================================================
+
+  Phase A — Dendrite linking (Phase 1)
+  ------------------------------------
+  • Load FOV + timepoints
+  • Link dendrite_id across timepoints (same dendritic branch)
+  • Saved to: respan\_annotator\fovN\dendrite_links.json
+
+  Phase B — Longitudinal spine tracking
+  -------------------------------------
+  • For each spine at the anchor (usually pre-droplet):
+      - Confirm or correct matches at every timepoint
+      - Set fate labels when needed (see section 4)
+  • Save & next → writes lineage and updates the registry
+  • Saved to:
+      respan\_annotator\fovN\lineage_decisions.json
+      respan\_annotator\fovN\spine_registry_wide.csv
+
+  Keyboard shortcuts (viewer):
+  • Tab  — Clear all (remove match + fate on every timepoint)
+  • Undo — revert the last change on the current spine
+
+================================================================================
+4. Fate logic — what each choice means
+================================================================================
+
+  Normal match (matched)
+  ----------------------
+  Click a spine_id from the CSV. The spine is observed at this timepoint.
+
+  NEW (automatic / explicit)
+  --------------------------
+  Spine first appears at this timepoint — all earlier timepoints are empty.
+
+  ARTIFACT (blind spot)
+  ---------------------
+  Region not reliably visible (image quality). Counted as censored, not lost.
+
+  False + (Artifact / Ignore)
+  ---------------------------
+  • Artifact — algorithm mistake, no real spine (only at this TP; all others
+    must be clear).
+  • Ignore — spine exists here but is out-of-focus at all other timepoints.
+
+  LOST (automatic on save)
+  ------------------------
+  Present at earlier timepoints, absent later with no other fate → lost_at_<tp>.
+
+================================================================================
+5. Output files and their meaning
+================================================================================
+
+  spine_registry_wide.csv — wide table, one row per lineage:
+  • lineage_id, pre_spine_id, anchor_timepoint
+  • first_seen_tp — first observed presence (match)
+  • last_seen_tp  — last observed presence
+  • censored_from_tp — start of censoring (artifact/OOF), not lost
+  • lifecycle — stable | transient | persistent_engram | right_censored | ...
+  • id_<tp>, status_<tp>, fate_<tp>, event_<tp> for each timepoint
+
+  lineage_decisions.json — full per-timepoint detail (coordinates, source, fate).
+
+  Derived events (event_<tp>):
+  • appeared_at_<tp>  — first appearance
+  • lost_at_<tp>      — lost after prior presence
+
+  Full field glossary: docs\spine_annotator_output_fields.csv
+
+================================================================================
+6. External dependencies
+================================================================================
+
+  Spine matching (scoring) uses scripts from:
+    D:\learning_project_spines\scripts\
+      hybrid_tracking\track_hybrid.py
+      step2-spine tracking\spine_matching_tool\utils.py
+
+  To change path: set environment variable SPINE_TRACKING_SCRIPTS
+
+  Python packages: fastapi, uvicorn, numpy, pandas, tifffile (demo)
+
+================================================================================
+7. Troubleshooting
+================================================================================
+
+  • Excel open on spine_registry_wide.csv → close before saving
+  • Code changes → hard refresh browser (Ctrl+F5) + restart server
+  • workspace not found → check path in config\annotator.json and drive access
+
+================================================================================

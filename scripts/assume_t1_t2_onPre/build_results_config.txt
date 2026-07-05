@@ -1,0 +1,10 @@
+# Config for build_results_skeleton.py
+# ------------------------------------
+# Path to the respan folder of the animal you want to prepare.
+# Replace 'xxx' with the animal ID (e.g. GP04, GP08).
+respan_path = E:\Noa\Pons - layer 5\Imaging\GP08\respan
+
+# Optional: explicitly list the FOVs to create (space or comma separated).
+# If left commented out, FOVs are auto-discovered from
+#   <respan>/<timepoint>/Tables/fovN_detected_spines*.csv
+# fovs = 1 2 3 4 5

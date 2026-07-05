@@ -1,0 +1,81 @@
+﻿file,field,type,allowed_values,description
+spine_registry_wide.csv,animal_id,fixed,,Animal identifier (e.g. DEMO10 GP04)
+spine_registry_wide.csv,fov,fixed,,Field of view number
+spine_registry_wide.csv,lineage_id,fixed,,Unique lineage ID (e.g. L_3)
+spine_registry_wide.csv,pre_spine_id,fixed,,Spine ID at review anchor
+spine_registry_wide.csv,anchor_timepoint,fixed,,Timepoint used as review anchor (review phase)
+spine_registry_wide.csv,active_timepoints,fixed,,Semicolon-separated active timepoints in this lineage
+spine_registry_wide.csv,first_seen_tp,fixed,,First timepoint with observed presence (match)
+spine_registry_wide.csv,last_seen_tp,fixed,,Last timepoint with observed presence
+spine_registry_wide.csv,censored_from_tp,fixed,,First censored timepoint (OOF/artifact/ignore; not LOST)
+spine_registry_wide.csv,formation_tp,fixed,,First appearance after gap (new spine)
+spine_registry_wide.csv,lifecycle,fixed,"stable;transient;persistent_engram;right_censored;censored_interval;unclassified",Overall lineage lifecycle class
+spine_registry_wide.csv,lifecycle (stable),enum value,stable,Present continuously across all timepoints
+spine_registry_wide.csv,lifecycle (transient),enum value,transient,Appeared and disappeared within tracking window
+spine_registry_wide.csv,lifecycle (persistent_engram),enum value,persistent_engram,Formation and/or loss without simple stable/transient pattern
+spine_registry_wide.csv,lifecycle (right_censored),enum value,right_censored,Censored through end of follow-up
+spine_registry_wide.csv,lifecycle (censored_interval),enum value,censored_interval,Censored interval mid timeline
+spine_registry_wide.csv,lifecycle (unclassified),enum value,unclassified,Could not classify (e.g. false positive only)
+spine_registry_wide.csv,right_censored,fixed,0;1,Flag: 1 = right-censored follow-up (not lost)
+spine_registry_wide.csv,id_<timepoint>,per_timepoint,,Spine ID at this timepoint
+spine_registry_wide.csv,status_<timepoint>,per_timepoint,"matched;manual;new;lost;artifact;ignored;censored;absent",Human-readable status at timepoint
+spine_registry_wide.csv,status (matched),enum value,matched,Spine match exists
+spine_registry_wide.csv,status (manual),enum value,manual,Manually added spine
+spine_registry_wide.csv,status (new),enum value,new,New spine first seen here
+spine_registry_wide.csv,status (lost),enum value,lost,Lost after prior presence
+spine_registry_wide.csv,status (artifact),enum value,artifact,Artifact / false detection (blind spot or algorithm)
+spine_registry_wide.csv,status (ignored),enum value,ignored,Out-of-focus / not trackable
+spine_registry_wide.csv,status (censored),enum value,censored,Blind spot censored observation
+spine_registry_wide.csv,status (absent),enum value,absent,No match and no fate
+spine_registry_wide.csv,fate_<timepoint>,per_timepoint,"(empty);lost;artifact;new;ignore;false_positive_artifact;false_positive_ignore",Raw fate label at timepoint
+spine_registry_wide.csv,fate (lost),enum value,lost,Inferred or marked lost
+spine_registry_wide.csv,fate (artifact),enum value,artifact,Blind-spot artifact
+spine_registry_wide.csv,fate (new),enum value,new,Inferred new spine after empty gap
+spine_registry_wide.csv,fate (ignore),enum value,ignore,Ignore / OOF
+spine_registry_wide.csv,fate (false_positive_artifact),enum value,false_positive_artifact,False positive: algorithm mistake (no spine)
+spine_registry_wide.csv,fate (false_positive_ignore),enum value,false_positive_ignore,False positive: OOF location at all other timepoints
+spine_registry_wide.csv,event_<timepoint>,per_timepoint,appeared_at_*;lost_at_*,Derived event tags at timepoint
+spine_registry_wide.csv,event (appeared_at),pattern,appeared_at_<tp>,New spine appeared at this timepoint
+spine_registry_wide.csv,event (lost_at),pattern,lost_at_<tp>,Lost after this timepoint (not inside it)
+spine_registry_wide.csv,<timepoint>_x,per_timepoint,,Stack X coordinate
+spine_registry_wide.csv,<timepoint>_y,per_timepoint,,Stack Y coordinate
+spine_registry_wide.csv,<timepoint>_z,per_timepoint,,Stack Z coordinate
+spine_registry_wide.csv,n_timepoints_seen,fixed,,Count of timepoints with match/manual/new status
+spine_registry_wide.csv,n_timepoints_continuous,fixed,,Count of timepoints with continuous lineage presence (observed matches)
+lineage_decisions.json,animal_id,metadata,,Animal identifier
+lineage_decisions.json,fov,metadata,,Field of view
+lineage_decisions.json,updated_at,metadata,,Last update timestamp (UTC ISO)
+lineage_decisions.json,lineages,array,,List of saved lineage records
+lineage_decisions.json,pre_spine_id,per lineage,,Anchor spine ID
+lineage_decisions.json,pre_timepoint,per lineage,,Anchor timepoint
+lineage_decisions.json,timepoint_names,per lineage,,Timepoints in this lineage
+lineage_decisions.json,first_seen_tp,per lineage,,First seen timepoint
+lineage_decisions.json,last_seen_tp,per lineage,,Last seen timepoint
+lineage_decisions.json,censored_from_tp,per lineage,,Censored-from timepoint
+lineage_decisions.json,right_censored,per lineage,true;false,Right-censored flag
+lineage_decisions.json,per_tp,per lineage,,Per-timepoint decision dictionary
+lineage_decisions.json,per_tp.spine_id,per timepoint,,Spine ID or empty
+lineage_decisions.json,per_tp.x,per timepoint,,Stack X
+lineage_decisions.json,per_tp.y,per timepoint,,Stack Y
+lineage_decisions.json,per_tp.z,per timepoint,,Stack Z
+lineage_decisions.json,per_tp.dendrite_id,per timepoint,,Dendrite ID
+lineage_decisions.json,per_tp.source,per timepoint,"pre_base;pre_mid_match;algo_chain;click_nearest;manual_added;lost_inferred_after_*;false_positive_*",How this timepoint was set
+lineage_decisions.json,per_tp.fate,per timepoint,,Fate or null for normal match
+lineage_decisions.json,per_tp.artifact_mode,per timepoint,blind_spot;false_positive,Artifact mode
+lineage_decisions.json,per_tp.removed_spine_id,per timepoint,,Removed spine ID if any (false positive)
+lineage_decisions.json,per_tp.continuity,per timepoint,,Continuity metadata if present
+spine_review_progress.json,phase_index,metadata,,Current review phase index (0 = pre)
+spine_review_progress.json,anchor_timepoint,metadata,,Current phase anchor timepoint
+spine_review_progress.json,last_pre_spine_index,metadata,,Last reviewed spine index
+spine_review_progress.json,reviewed_ids,metadata,,Spine IDs already saved
+spine_review_progress.json,updated_at,metadata,,Last update
+dendrite_links.json,link_id,per link,,Link identifier
+dendrite_links.json,members,per link,,Timepoint to dendrite ID mapping
+dendrite_links.json,notes,per link,,Free-text notes
+dendrite_links.json,timepoint_names,metadata,,Project timepoint order
+dendrite_link_progress.json,visited_link_ids,metadata,,Links visited in dendrite linker
+oof_segments.json,segment_id,per segment,,OOF segment ID
+oof_segments.json,per_tp,per segment,,Shape per timepoint
+timepoint_selection.json,(selected TPs),metadata,,Active timepoints for FOV
+_removed_columns,disappeared_at_tp,removed,,Removed; use last_seen_tp and event_* (lost_at_*)
+_removed_columns,termination_tp,removed,,Removed; use event_* (lost_at_*)
