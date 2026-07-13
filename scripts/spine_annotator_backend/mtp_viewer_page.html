@@ -473,9 +473,14 @@ function showReviewComplete(res) {
   }
   if (text) {
     const when = formatFileTime(res && res.registry_mtime);
-    const extra = res && res.registry_path
+    let extra = res && res.registry_path
       ? ' File: ' + res.registry_path + (when ? ' (' + when + ')' : '')
       : '';
+    if (res && res.results_final_dir) {
+      extra += ' Merged output: ' + res.results_final_dir;
+    } else if (res && res.pending_fovs && res.pending_fovs.length) {
+      extra += ' Pending FOV(s): ' + res.pending_fovs.join(', ') + '.';
+    }
     text.textContent = (res && res.message) || ('All spines reviewed.' + extra);
   }
   document.getElementById('status').textContent =
@@ -493,9 +498,13 @@ function maybeShowAlreadyComplete(load) {
   if (queueEmpty && lastPhase && (pendingUnreviewed > 0 || pendingDup > 0)) return false;
   if (queueEmpty && lastPhase && (reviewed.length > 0 || hasRegistry)) {
     showReviewComplete({
-      message: `Loaded ${load.lineage_count || reviewed.length} saved spine(s) from disk — not saved just now.`,
+      message: load.all_fovs_complete && load.results_final_dir
+        ? `All FOVs complete — Results final: ${load.results_final_dir}`
+        : `Loaded ${load.lineage_count || reviewed.length} saved spine(s) from disk — not saved just now.`,
       registry_path: load.registry_path || expectedRegistryPath(load),
       registry_mtime: load.registry_mtime || load.decisions_mtime || '',
+      results_final_dir: load.results_final_dir || '',
+      pending_fovs: load.pending_fovs || [],
     });
     return true;
   }

@@ -19,7 +19,16 @@ from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel, Field
 
 from . import animal_config, animal_layout, baseline_adapter, crop_service, dendrite_link_store
-from . import mtp_spine_matching, oof_segment_store, spine_lineage_store, manual_spine_store, ignored_spine_store, spine_catalog_store, spine_qc_store
+from . import (
+    mtp_spine_matching,
+    oof_segment_store,
+    spine_lineage_store,
+    manual_spine_store,
+    ignored_spine_store,
+    spine_catalog_store,
+    spine_qc_store,
+    results_final_store,
+)
 
 router = APIRouter(prefix="/mtp/viewer", tags=["multi-timepoint-spine-viewer"])
 
@@ -109,19 +118,7 @@ def _find_registry_csv(respan: Path, fov: int) -> Optional[Path]:
     meta = respan / "_annotator" / f"fov{fov}" / "spine_registry_wide.csv"
     if meta.is_file():
         return meta
-    candidates: List[Path] = []
-    results = respan / "results"
-    if results.is_dir():
-        candidates.extend(results.rglob("spine_registry_wide.csv"))
-    for path in sorted(candidates, key=lambda p: p.stat().st_mtime, reverse=True):
-        try:
-            with path.open(newline="", encoding="utf-8") as fh:
-                row = next(csv.DictReader(fh), None)
-            if row and str(row.get("fov", "")).strip() == str(fov):
-                return path
-        except (OSError, StopIteration, csv.Error):
-            continue
-    return candidates[0] if candidates else None
+    return None
 
 
 def _parse_registry(path: Path, timepoint_names: List[str], *, fov: int) -> List[dict]:
@@ -1023,6 +1020,28 @@ def _registry_mtime_iso(path: Optional[Path]) -> str:
         return ""
 
 
+def _attach_results_final(respan: Path, out: dict, *, rebuild: bool = True) -> None:
+    """Add all-FOV completion status; build Results final when every FOV is done."""
+    cfg = animal_config.load_config()
+    statuses, all_complete = results_final_store.all_fovs_status(respan, cfg)
+    out["all_fovs_complete"] = all_complete
+    out["fov_completion_status"] = statuses
+    if not all_complete:
+        out["pending_fovs"] = [s["fov"] for s in statuses if not s["complete"]]
+        return
+    if not rebuild:
+        out["results_final_dir"] = str(results_final_store.results_final_dir(respan))
+        return
+    try:
+        built = results_final_store.build_results_final(respan, cfg)
+        build_msg = built.pop("message", "")
+        out.update(built)
+        if build_msg:
+            out["results_final_message"] = build_msg
+    except Exception as exc:
+        out["results_final_error"] = str(exc)
+
+
 def _apply_fate_rules(positions: Dict[str, dict]) -> Dict[str, dict]:
     tps = _STATE.timepoint_names
     out = spine_lineage_store.strip_bridge_fates(positions, tps)
@@ -1630,6 +1649,9 @@ class LoadResponse(BaseModel):
     duplicate_count: int = 0
     unreviewed_count: int = 0
     spine_ids: List[str] = Field(default_factory=list)
+    all_fovs_complete: bool = False
+    results_final_dir: str = ""
+    pending_fovs: List[int] = Field(default_factory=list)
     message: str = ""
 
 
@@ -1958,6 +1980,16 @@ def load_from_animal(
         if dec_path.is_file():
             dec_mtime = _registry_mtime_iso(dec_path)
 
+        load_extra: dict = {}
+        _attach_results_final(respan, load_extra)
+        final_msg = ""
+        if load_extra.get("results_final_dir"):
+            final_msg = f" Results final: {load_extra['results_final_dir']}."
+        elif load_extra.get("pending_fovs"):
+            final_msg = (
+                f" FOV(s) still pending: {', '.join(str(x) for x in load_extra['pending_fovs'])}."
+            )
+
         return LoadResponse(
             animal_id=_STATE.animal_id,
             fov=fov,
@@ -1985,7 +2017,10 @@ def load_from_animal(
             duplicate_count=dup_n,
             unreviewed_count=unrev_n,
             spine_ids=list(_STATE.t1_spine_ids),
-            message=" ".join(msg_parts),
+            all_fovs_complete=bool(load_extra.get("all_fovs_complete")),
+            results_final_dir=str(load_extra.get("results_final_dir") or ""),
+            pending_fovs=list(load_extra.get("pending_fovs") or []),
+            message=" ".join(msg_parts) + final_msg,
         )
     except HTTPException:
         raise
@@ -2829,10 +2864,24 @@ def confirm_lineage() -> dict:
         )
         if out["review_complete"]:
             cov = _STATE.coverage_summary or {}
-            out["message"] = (
-                f"Review complete — {cov.get('tagged', '?')}/{cov.get('catalog_total', '?')} spines tagged · "
-                f"0 duplicates · 0 unreviewed."
-            )
+            _attach_results_final(respan, out)
+            if out.get("all_fovs_complete") and out.get("results_final_dir"):
+                out["message"] = (
+                    f"Review complete for FOV {_STATE.fov}. "
+                    f"All FOVs done — Results final: {out['results_final_dir']}"
+                )
+            elif out.get("pending_fovs"):
+                pending = ", ".join(str(x) for x in out["pending_fovs"])
+                out["message"] = (
+                    f"Review complete for FOV {_STATE.fov} "
+                    f"({cov.get('tagged', '?')}/{cov.get('catalog_total', '?')} tagged). "
+                    f"Still pending: FOV {pending}."
+                )
+            else:
+                out["message"] = (
+                    f"Review complete — {cov.get('tagged', '?')}/{cov.get('catalog_total', '?')} spines tagged · "
+                    f"0 duplicates · 0 unreviewed."
+                )
         return out
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -2963,6 +3012,18 @@ def resolve_conflict(req: ResolveConflictRequest) -> dict:
             out["message"] = (
                 f"Review complete — {cov.get('tagged', '?')}/{cov.get('catalog_total', '?')} spines tagged."
             )
+            _attach_results_final(respan, out)
+            if out.get("results_final_dir") and out.get("all_fovs_complete"):
+                out["message"] = (
+                    f"Review complete for FOV {_STATE.fov}. "
+                    f"All FOVs done — Results final: {out['results_final_dir']}"
+                )
+            elif out.get("pending_fovs"):
+                pending = ", ".join(str(x) for x in out["pending_fovs"])
+                out["message"] = (
+                    f"Review complete for FOV {_STATE.fov}. "
+                    f"Still pending: FOV {pending}."
+                )
         return out
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

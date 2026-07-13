@@ -18,6 +18,7 @@ class AnimalConfigResponse(BaseModel):
     workspace: str = ""
     respan_root: str = ""
     results_root: str = ""
+    results_final_dir: str = ""
     default_fov: int = 1
     folder_open_depth: int = 2
     config_path: str = ""
@@ -92,6 +93,7 @@ def get_animal_config() -> AnimalConfigResponse:
         workspace=paths.get("workspace", ""),
         respan_root=respan,
         results_root=paths.get("results_root", ""),
+        results_final_dir=paths.get("results_final_dir", ""),
         default_fov=cfg.default_fov,
         folder_open_depth=cfg.folder_open_depth,
         config_path=paths.get("config_path", ""),
