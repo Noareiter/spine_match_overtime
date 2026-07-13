@@ -397,7 +397,9 @@ def infer_lost_after_last_match(
 
     Summary fields returned:
     - last_seen_tp: last timepoint with observed presence
-    - disappeared_at_tp: first timepoint classified as LOST (empty if not lost)
+    - disappeared_at_tp: last timepoint with observed presence before the loss
+      (empty if not lost) — per the LOST convention, a spine is lost at the last
+      TP it was seen, not the first TP it went missing.
     - censored_from_tp: first censored / OOF-ignore timepoint (empty if fully tracked)
     """
     out = {tp: dict(per_tp.get(tp) or {}) for tp in timepoint_names}
@@ -425,7 +427,7 @@ def infer_lost_after_last_match(
 
         if fate == "lost" and not _tp_is_present(td):
             if not disappeared_at_tp:
-                disappeared_at_tp = tp
+                disappeared_at_tp = last_seen_tp
             _mark_lost_from_index(
                 out,
                 timepoint_names,
@@ -502,7 +504,15 @@ def infer_lost_after_last_match(
                 td["source"] = f"ignore_inferred_after_{last_seen_tp}"
                 _mark_ignore_from_index(out, timepoint_names, i + 1, last_seen_tp)
                 break
-            # Lineage ends at last_seen_tp (last visible); gap TPs return to pool — no lost fate on later TPs.
+            # Lineage ends at last_seen_tp (last visible). A LOST timepoint carries no
+            # spine_id (see _mark_lost_from_index), so writing the lost fate here does
+            # not conflict with gap TPs returning their matches to the pool.
+            _mark_lost_from_index(
+                out,
+                timepoint_names,
+                i,
+                last_seen_tp,
+            )
             disappeared_at_tp = last_seen_tp
             break
 
