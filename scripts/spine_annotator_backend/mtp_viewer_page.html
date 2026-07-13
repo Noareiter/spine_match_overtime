@@ -136,10 +136,11 @@
       <button type="button" id="editRowB" class="edit-row" onclick="setConflictFocus('b')">Edit row B</button>
       <button type="button" onclick="saveConflictEdits('a')">Save row A edits</button>
       <button type="button" onclick="saveConflictEdits('b')">Save row B edits</button>
-      <button type="button" class="keep-a" onclick="resolveConflict('a')">Keep lineage A (finish)</button>
-      <button type="button" class="keep-b" onclick="resolveConflict('b')">Keep lineage B (finish)</button>
+      <button type="button" id="keepBtnA" class="keep-a" onclick="resolveConflict('a')">Keep lineage A (finish)</button>
+      <button type="button" id="keepBtnB" class="keep-b" onclick="resolveConflict('b')">Keep lineage B (finish)</button>
       <span id="conflictHint" style="font-size:11px;color:var(--muted)">Pick Edit A or B (or click a row). Each row: click spines to match · Clear · False+ on fate bar below that row.</span>
     </div>
+    <div id="conflictBlastRadius" style="margin-top:6px;font-size:12px;font-weight:600"></div>
   </div>
   <div class="row-label" id="topRowLabel">Top — zoom-in (click label = select · Force add ON = click to add spine)</div>
   <div class="row-wrap" id="topRowWrap"><div class="grid5" id="zoomRow"></div></div>
@@ -349,11 +350,32 @@ function updateConflictUi() {
       btnB.classList.toggle('active-b', S.conflictFocus === 'b');
       btnB.textContent = `Edit row B${S.lineageBKey ? ' ('+S.lineageBKey+')' : ''}`;
     }
+    // Blast radius: what losing the contested spine does to the OTHER lineage.
+    // Must be visible before she commits -- she should never find out which she
+    // picked only after pressing the key.
+    const brA = (S.conflict && S.conflict.blast_radius_a) || ''; // A's fate if A loses (Keep B)
+    const brB = (S.conflict && S.conflict.blast_radius_b) || ''; // B's fate if B loses (Keep A)
+    const descr = (br) => br === 'dissolves' ? 'dissolves (hole mid-lineage)' : br === 'truncates' ? 'truncates (ends earlier, stays valid)' : '';
+    const keepBtnA = document.getElementById('keepBtnA');
+    const keepBtnB = document.getElementById('keepBtnB');
+    if (keepBtnA) keepBtnA.textContent = 'Keep lineage A (finish)' + (brB ? ` — B ${brB}` : '');
+    if (keepBtnB) keepBtnB.textContent = 'Keep lineage B (finish)' + (brA ? ` — A ${brA}` : '');
+    const radiusEl = document.getElementById('conflictBlastRadius');
+    if (radiusEl) {
+      const lines = [];
+      if (brB) lines.push(`Keep A → B ${descr(brB)}`);
+      if (brA) lines.push(`Keep B → A ${descr(brA)}`);
+      radiusEl.innerHTML = lines
+        .map((t) => `<div style="color:${t.includes('dissolves') ? '#dc2626' : '#16a34a'}">${t}</div>`)
+        .join('');
+    }
   } else {
     if (topLbl) topLbl.textContent = 'Top — zoom-in (click label = select · Force add ON = click to add spine)';
     if (botLbl) botLbl.textContent = 'Bottom — full FOV (wheel = zoom · Shift+wheel = Z · Fit = whole image)';
     if (topWrap) topWrap.classList.remove('focus-a');
     if (botWrap) botWrap.classList.remove('focus-b');
+    const radiusEl = document.getElementById('conflictBlastRadius');
+    if (radiusEl) radiusEl.innerHTML = '';
   }
 }
 

@@ -2446,11 +2446,18 @@ def set_spine(req: SetSpineRequest) -> SelectSpineResponse:
         lookup = _STATE.spine_lookup.get(tp) or {}
         if sid not in lookup:
             raise ValueError(f"Spine '{sid}' not found at '{tp}'.")
+        # A spine already claimed by another lineage is allowed here -- the
+        # "one spine, one lineage" invariant is enforced at export, not at
+        # click time (see find_duplicate_conflicts / apply_conflict_resolution).
+        # The claim just becomes a conflict the user resolves later, with both
+        # complete lineages in front of her instead of a forced snap decision.
         claimed = _claimed_for_matching(tp)
-        if sid in claimed and sid not in _current_lineage_spine_ids():
-            raise ValueError(
-                f"Spine '{sid}' at '{tp}' is already assigned to another lineage."
-            )
+        warning = (
+            f"Spine '{sid}' at '{tp}' is already claimed by another lineage — "
+            f"this creates a conflict to resolve later (export is blocked until then)."
+            if sid in claimed and sid not in _current_lineage_spine_ids()
+            else ""
+        )
         rec = lookup[sid]
         pos_map = _active_positions()
         pos_map[tp] = {
@@ -2463,7 +2470,7 @@ def set_spine(req: SetSpineRequest) -> SelectSpineResponse:
             "fate": None,
         }
         _set_active_positions(_apply_fate_rules(pos_map))
-        return _select_spine_response()
+        return _select_spine_response(message=warning)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
