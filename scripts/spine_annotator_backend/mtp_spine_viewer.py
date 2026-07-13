@@ -2294,6 +2294,124 @@ def select_spine(req: SelectSpineRequest) -> SelectSpineResponse:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+def _jump_to_qc_phase_if_pending() -> Optional[str]:
+    """Unlike _snap_to_pending_qc_work (which only corrects a phase index already
+    at/past the QC phases), this jumps forward from anywhere -- including phase 0
+    -- the moment there's nothing left to do in the current phase.
+    """
+    dup_idx, unrev_idx = _qc_phase_indices()
+    dup_n, unrev_n = _pending_qc_counts()
+    if dup_n > 0:
+        _STATE.queue_phase_index = dup_idx
+        _rebuild_spine_id_list()
+        return f"Jumped to duplicate conflicts ({dup_n} pending)."
+    if unrev_n > 0:
+        _STATE.queue_phase_index = unrev_idx
+        _rebuild_spine_id_list()
+        return f"Jumped to unreviewed sweep ({unrev_n} pending)."
+    return None
+
+
+def _next_unresolved_index_in_current_phase() -> Optional[int]:
+    """Index of the next spine in the current phase queue that isn't reviewed yet."""
+    ids = _STATE.t1_spine_ids
+    if not ids:
+        return None
+    reviewed = set(_STATE.review_progress.get("reviewed_ids") or [])
+    cur = ids.index(_STATE.active_t1_spine_id) if _STATE.active_t1_spine_id in ids else -1
+    n = len(ids)
+    for offset in range(1, n + 1):
+        idx = (cur + offset) % n
+        if ids[idx] not in reviewed:
+            return idx
+    return None
+
+
+@router.post("/jump-unresolved")
+def jump_unresolved() -> dict:
+    """Jump to the next thing needing a decision: an un-reviewed spine in the
+    current phase, else the earliest QC phase (duplicates, then unreviewed
+    detections) that still has pending work.
+    """
+    try:
+        respan = _respan_path()
+        idx = _next_unresolved_index_in_current_phase()
+        if idx is not None:
+            resp = select_spine(SelectSpineRequest(t1_spine_id=_STATE.t1_spine_ids[idx]))
+        else:
+            snap_msg = _jump_to_qc_phase_if_pending()
+            resp = None
+            if snap_msg:
+                _ensure_nonempty_phase(respan)
+                if _STATE.t1_spine_ids:
+                    resp = select_spine(SelectSpineRequest(t1_spine_id=_STATE.t1_spine_ids[0]))
+                    resp.message = f"{snap_msg} {resp.message}".strip()
+            if resp is None:
+                return {
+                    **_select_spine_response(
+                        message="Nothing unresolved — full coverage in this FOV."
+                    ).model_dump(),
+                    "spine_ids": list(_STATE.t1_spine_ids),
+                    "phase_index": _STATE.queue_phase_index,
+                }
+        out = resp.model_dump()
+        out["spine_ids"] = list(_STATE.t1_spine_ids)
+        out["phase_index"] = _STATE.queue_phase_index
+        return out
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+class AcceptSuggestionRequest(BaseModel):
+    timepoint: str
+    lineage_row: str = ""
+
+
+@router.post("/accept-suggestion", response_model=SelectSpineResponse)
+def accept_suggestion(req: AcceptSuggestionRequest) -> SelectSpineResponse:
+    """Confirm the algorithm's current candidate at this TP without a click.
+
+    If the TP already holds a resolved spine_id (the common case -- the
+    algorithm's nearest-match is pre-filled), this just re-applies it. If the
+    focus was moved to a bare coordinate (no labeled spine under it), this
+    looks up the nearest spine there, exactly like clicking that marker would.
+    """
+    try:
+        _apply_conflict_edit_row(req.lineage_row)
+        tp = req.timepoint
+        if tp not in _STATE.timepoint_names:
+            raise ValueError(f"Unknown timepoint '{tp}'.")
+        pos_map = _active_positions()
+        pos = dict(pos_map.get(tp) or {})
+        sid = str(pos.get("spine_id") or "").strip()
+        lookup = _STATE.spine_lookup.get(tp) or {}
+        if not sid or sid not in lookup:
+            x, y, z = pos.get("x"), pos.get("y"), pos.get("z")
+            if x is None or y is None:
+                raise ValueError(f"No candidate to accept at '{tp}'.")
+            near = _nearest_spine(lookup, float(x), float(y), float(z or 0), tp=tp)
+            if not near:
+                raise ValueError(f"No candidate to accept at '{tp}'.")
+            pos_map[tp] = {**near, "source": "accepted_suggestion", "fate": None}
+        else:
+            rec = lookup[sid]
+            pos_map[tp] = {
+                "spine_id": sid,
+                "x": float(rec["x"]),
+                "y": float(rec["y"]),
+                "z": float(rec["z"]),
+                "dendrite_id": str(rec.get("dendrite_id") or ""),
+                "source": "accepted_suggestion",
+                "fate": None,
+            }
+        _set_active_positions(_apply_fate_rules(pos_map))
+        return _select_spine_response(message=f"Accepted suggestion at {tp}.")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.post("/focus", response_model=SelectSpineResponse)
 def update_focus(req: FocusRequest) -> SelectSpineResponse:
     """Click-to-focus: update one timepoint focus and refresh zoom alignment."""

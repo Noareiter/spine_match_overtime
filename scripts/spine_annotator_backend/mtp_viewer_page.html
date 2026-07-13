@@ -2128,6 +2128,24 @@ function textInputFocused() {
 }
 
 function onViewerKeydown(e) {
+  // Ctrl combos are handled first since they're excluded by the plain-key guard below.
+  if (e.ctrlKey && !e.altKey && !e.metaKey) {
+    if (e.code === 'KeyZ') {
+      if (textInputFocused()) return;
+      e.preventDefault();
+      e.stopPropagation();
+      undoLastChoice();
+      return;
+    }
+    if (e.code === 'Enter') {
+      if (textInputFocused() || S.reviewComplete) return;
+      e.preventDefault();
+      e.stopPropagation();
+      nextSpine(); // Save & next (same as the Next button / confirm-lineage).
+      return;
+    }
+    return;
+  }
   if (e.ctrlKey || e.altKey || e.metaKey) return;
   if (e.code === 'KeyS') {
     if (textInputFocused()) return;
@@ -2159,6 +2177,29 @@ function onViewerKeydown(e) {
     }
     return;
   }
+  if (e.code === 'Space') {
+    if (textInputFocused()) return;
+    e.preventDefault();
+    e.stopPropagation();
+    jumpUnresolved();
+    return;
+  }
+  if (e.code === 'ArrowLeft' || e.code === 'ArrowRight') {
+    if (textInputFocused() || S.reviewComplete || !S.t1SpineIds.length) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const delta = e.code === 'ArrowLeft' ? -1 : 1;
+    selectSpineAt(S.idx + delta);
+    return;
+  }
+  if (e.code === 'Enter') {
+    if (textInputFocused() || S.reviewComplete || S.reviewMode !== 'timepoint') return;
+    e.preventDefault();
+    e.stopPropagation();
+    const tp = S.anchorTp || S.timepoints[0];
+    if (tp) acceptSuggestion(tp);
+    return;
+  }
   if (S.reviewMode !== 'timepoint' || S.reviewComplete) return;
   const tp = S.anchorTp || S.timepoints[0];
   if (!tp) return;
@@ -2169,6 +2210,36 @@ function onViewerKeydown(e) {
   e.preventDefault();
   e.stopPropagation();
   setLocalFate(tp, fate);
+}
+
+async function acceptSuggestion(tp) {
+  try {
+    const body = { timepoint: tp };
+    if (S.phaseKind === 'duplicate') body.lineage_row = S.conflictFocus;
+    const res = await api('/mtp/viewer/accept-suggestion', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(body)
+    });
+    applyPositionsResponse(res);
+    document.getElementById('status').textContent = res.message || 'Accepted.';
+    updateHeaders();
+    if (S.phaseKind === 'duplicate') updateHeadersB();
+    updateFateBars();
+    await refreshAll();
+  } catch(err) {
+    document.getElementById('status').textContent = String(err.message || err);
+  }
+}
+
+async function jumpUnresolved() {
+  try {
+    const res = await api('/mtp/viewer/jump-unresolved', { method:'POST' });
+    if (res.review_complete) { showReviewComplete(res); return; }
+    await applyQueueUpdate(res);
+    document.getElementById('status').textContent = res.message || '';
+  } catch(err) {
+    document.getElementById('status').textContent = String(err.message || err);
+  }
 }
 
 function setAddSpineMode(on) {
