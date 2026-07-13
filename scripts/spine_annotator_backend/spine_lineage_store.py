@@ -1013,6 +1013,13 @@ def _lineage_summary_fields(lineage: dict, per_tp: Dict[str, dict], timepoint_na
 
 
 def _registry_header(timepoint_names: List[str]) -> List[str]:
+    # Survival-analysis / interpretation fields (event_<tp>, formation_tp,
+    # lifecycle, right_censored, censored_from_tp, n_timepoints_seen,
+    # n_timepoints_continuous, active_timepoints) are derived classifications,
+    # not observations -- reconstruct them with postprocess_registry.py instead
+    # of reading them from this file. first_seen_tp/last_seen_tp stay: they're
+    # cheap summaries used elsewhere (not raw per-TP observations, but not an
+    # interpretation of what happened either).
     header = [
         "animal_id",
         "fov",
@@ -1020,23 +1027,17 @@ def _registry_header(timepoint_names: List[str]) -> List[str]:
         "lineage_key",
         "pre_spine_id",
         "anchor_timepoint",
-        "active_timepoints",
         "first_seen_tp",
         "last_seen_tp",
-        "censored_from_tp",
-        "formation_tp",
-        "lifecycle",
-        "right_censored",
     ]
     header += [f"id_{tp}" for tp in timepoint_names]
     header += [f"local_id_{tp}" for tp in timepoint_names]
     header += [f"status_{tp}" for tp in timepoint_names]
     header += [f"fate_{tp}" for tp in timepoint_names]
-    header += [f"event_{tp}" for tp in timepoint_names]
+    header += [f"artifact_mode_{tp}" for tp in timepoint_names]
     header += [f"{tp}_x" for tp in timepoint_names]
     header += [f"{tp}_y" for tp in timepoint_names]
     header += [f"{tp}_z" for tp in timepoint_names]
-    header += ["n_timepoints_seen", "n_timepoints_continuous"]
     return header
 
 
@@ -1050,15 +1051,9 @@ def _build_registry_row(
     lineage_key = str(lineage.get("lineage_key") or pre_id or "")
     per_tp = dict(lineage.get("per_tp") or {})
     row_tps = list(lineage.get("timepoint_names") or timepoint_names)
-    active_label = ";".join(row_tps)
-    events_by_tp, formation_tp, _termination_tp, lifecycle = _derive_events_and_lifecycle(
-        row_tps, per_tp
-    )
-    first_seen_tp, last_seen_tp, censored_from_tp, right_censored = _lineage_summary_fields(
+    first_seen_tp, last_seen_tp, _censored_from_tp, _right_censored = _lineage_summary_fields(
         lineage, per_tp, row_tps
     )
-    if right_censored and lifecycle not in ("stable", "transient", "persistent_engram"):
-        lifecycle = "right_censored"
     row: Dict[str, str] = {
         "animal_id": animal_id,
         "fov": str(fov),
@@ -1066,16 +1061,9 @@ def _build_registry_row(
         "lineage_key": lineage_key,
         "pre_spine_id": pre_id,
         "anchor_timepoint": str(lineage.get("pre_timepoint", "") or ""),
-        "active_timepoints": active_label,
         "first_seen_tp": first_seen_tp,
         "last_seen_tp": last_seen_tp,
-        "censored_from_tp": censored_from_tp,
-        "formation_tp": formation_tp,
-        "lifecycle": lifecycle,
-        "right_censored": "1" if right_censored else "0",
     }
-    seen = 0
-    continuous_n = 0
     for tp in timepoint_names:
         td = per_tp.get(tp) or {}
         sid = str(td.get("spine_id") or "").strip()
@@ -1085,16 +1073,10 @@ def _build_registry_row(
         row[f"local_id_{tp}"] = local_sid if tp in per_tp else ""
         row[f"status_{tp}"] = status
         row[f"fate_{tp}"] = _fate_for_tp(td) if tp in per_tp else ""
-        row[f"event_{tp}"] = str(events_by_tp.get(tp) or "") if tp in row_tps else ""
+        row[f"artifact_mode_{tp}"] = _artifact_mode(td) if tp in per_tp else ""
         row[f"{tp}_x"] = str(td.get("x", "")) if tp in per_tp and td.get("x") is not None else ""
         row[f"{tp}_y"] = str(td.get("y", "")) if tp in per_tp and td.get("y") is not None else ""
         row[f"{tp}_z"] = str(td.get("z", "")) if tp in per_tp and td.get("z") is not None else ""
-        if status in ("matched", "manual", "new"):
-            seen += 1
-        if tp in per_tp and _lineage_continuous_present(td):
-            continuous_n += 1
-    row["n_timepoints_seen"] = str(seen)
-    row["n_timepoints_continuous"] = str(continuous_n)
     return row
 
 
