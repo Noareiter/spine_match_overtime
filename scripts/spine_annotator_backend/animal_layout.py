@@ -16,19 +16,64 @@ _TIFF_FOV_RE = re.compile(r"^fov(\d+)(?:[_\-.].*)?\.(?:tif|tiff)$", re.IGNORECAS
 _SKIP_DIR_NAMES = {"tables", "results", "old_inffered", "__pycache__"}
 
 
+class _SimpleInputProvenance:
+    """Fallback layout discovery when input_provenance.py is unavailable."""
+
+    @staticmethod
+    def list_respan_timepoint_dirs(respan_root: Path) -> List[Path]:
+        """List all direct subdirectories under respan_root (excluding special dirs)."""
+        dirs = []
+        for child in respan_root.iterdir():
+            if not child.is_dir() or child.name.startswith("_"):
+                continue
+            if child.name.lower() in _SKIP_DIR_NAMES:
+                continue
+            dirs.append(child)
+        return sorted(dirs, key=lambda p: p.name)
+
+    @staticmethod
+    def normalize_timepoint_key(label: str) -> str:
+        """Normalize a timepoint label for comparison."""
+        return label.lower().strip()
+
+    @staticmethod
+    def find_spine_csv(respan_root: Path, timepoint: str, fov: int) -> Path:
+        """Find the detected spines CSV for a given timepoint and FOV."""
+        tp_dir = respan_root / timepoint
+        if not tp_dir.is_dir():
+            raise FileNotFoundError(f"Timepoint dir not found: {tp_dir}")
+        tables = tp_dir / "Tables"
+        if tables.is_dir():
+            for csv in tables.glob(f"fov{fov}*detected_spines*.csv"):
+                return csv
+        raise FileNotFoundError(f"No spine CSV for fov{fov} under {tp_dir}")
+
+    @staticmethod
+    def resolve_timepoint_dir(respan_root: Path, timepoint: str) -> Path:
+        """Resolve a timepoint directory by name."""
+        tp_dir = respan_root / timepoint
+        if not tp_dir.is_dir():
+            raise FileNotFoundError(f"Timepoint directory not found: {tp_dir}")
+        return tp_dir
+
+
 def _import_input_provenance():
+    """Try to import input_provenance.py, fall back to simple implementation if not available."""
     from .project_paths import ASSUME_T1_T2_DIR
 
     prov_path = ASSUME_T1_T2_DIR / "input_provenance.py"
-    if not prov_path.is_file():
-        raise FileNotFoundError(f"input_provenance.py not found: {prov_path}")
-    spec = importlib.util.spec_from_file_location("input_provenance_layout", prov_path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Cannot load {prov_path}")
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules.setdefault("input_provenance_layout", mod)
-    spec.loader.exec_module(mod)
-    return mod
+    if prov_path.is_file():
+        try:
+            spec = importlib.util.spec_from_file_location("input_provenance_layout", prov_path)
+            if spec is not None and spec.loader is not None:
+                mod = importlib.util.module_from_spec(spec)
+                sys.modules.setdefault("input_provenance_layout", mod)
+                spec.loader.exec_module(mod)
+                return mod
+        except Exception:
+            pass
+    # Fallback: use simple implementation
+    return _SimpleInputProvenance()
 
 
 def discover_fovs(respan_root: Path) -> List[int]:

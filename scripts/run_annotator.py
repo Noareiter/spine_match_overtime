@@ -84,11 +84,13 @@ def main() -> None:
         print(f"Quick reference: {help_path}")
 
     if args.open_folders:
-        from open_animal_folders import main as open_folders_main
-
-        rc = open_folders_main()
-        if rc != 0:
-            print("Folder open skipped — create workspace folder or fix config/annotator.json")
+        try:
+            from open_animal_folders import main as open_folders_main
+            rc = open_folders_main()
+            if rc != 0:
+                print("Folder open skipped — create workspace folder or fix config/annotator.json")
+        except ModuleNotFoundError:
+            print("(Folder open skipped — open_animal_folders module not available)")
 
     if not args.no_browser:
         help_path = (PROJECT_ROOT / "QUICK_REFERENCE.html").resolve()

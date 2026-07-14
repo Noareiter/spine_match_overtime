@@ -1,0 +1,179 @@
+========================================================================
+INTEGRATING THE DEEPNET SPINE-MATCHING MODEL INTO THE SERVER
+Council conclusion (4-role local review, read-only investigation)
+Date: 2026-07-14
+Repos: D:\DeepNetSpineMatching (model)  |  D:\spine_match_overtime (server)
+========================================================================
+
+HEADLINE
+------------------------------------------------------------------------
+Integration point is settled and clean: port the appearance layer into
+the server's baseline_adapter.score_candidates_hybrid (the single funnel
+every suggestion path already routes through) and thread the two TIFF
+paths to its 5 call sites. The model score BLENDS + RE-RANKS inside the
+existing geometry gate -- never hard-gates, never auto-confirms.
+
+BUT the ready-made template in the model repo has three latent bugs that
+would silently make suggestions WORSE, and the whole thing fails silently
+when off. Fix those first. Do not ship the template as-is.
+
+
+CONSENSUS (all 4 agents, file-verified)
+------------------------------------------------------------------------
+WIRING
+- Server score_candidates_hybrid is byte-identical to the model repo's
+  copy EXCEPT the additive appearance block. Clean cherry-pick, not merge.
+- Add params w_app, t1_tiff_path, t2_tiff_path; copy _add_appearance_scores
+  helper; re-blend after finalize_scores.
+- Thread session TIFF paths through 5 sites: app.py:459/564/826,
+  mtp_spine_matching.py:105/207. LoadedSession already holds
+  t1_tiff_path / t2_tiff_path.
+- Land baseline_adapter change first (new params default None -> fully
+  backward-compatible), then wire call sites. Two independently-safe commits.
+
+PARITY HOLDS TODAY, NOTHING PINS IT
+- crop_service.centered_crop + baseline_adapter.load_stack (both delegate
+  to shared external D:\learning_project_spines\...\utils.py) are identical
+  across repos -- RIGHT NOW. Any future edit to crop defaults / stack dtype /
+  orientation breaks inference invisibly. Need a code-hash/provenance guard
+  in the checkpoint + a CI golden-crop test.
+
+BLEND, GATE FIRST, NEVER RESCUE PAST THE GATE
+- Keep distance_z<=7 + xy<=80 + dendrite-link filter as the hard pre-filter
+  (also keeps GPU cost down). Appearance only reorders survivors -- it
+  cannot recover a geometrically-gated true match. Quantify recall lost.
+
+SILENT FAILURE IS THE DEFAULT AND THAT'S THE DANGER
+- Model missing (SPINE_MATCHER_CHECKPOINT unset), no TIFF path, or per-pair
+  exception all degrade to no-op / NaN with zero operator signal -- "off"
+  looks identical to "broken." Add explicit logged status
+  (active | model-missing | disabled-no-tiff) + integration test asserting
+  final_score actually changes when enabled.
+
+
+MUST-FIX BUGS IN THE TEMPLATE (ranked -- sharpest finding)
+------------------------------------------------------------------------
+Two agents independently pulled data/checkpoints/GP04/eval_report.json:
+REAL match threshold tau ~= 0.175 (per-session 0.10-0.375), NOT 0.5.
+True-match cosine sits ~0.175-0.4. That fact breaks three template
+assumptions:
+
+1. score_app fills missing/failed pairs with 0.5 (baseline_adapter.py:230).
+   0.5 is HIGHER than a genuine match's cosine. So a candidate whose crop
+   failed to extract outranks the real match.
+   FIX: fill low (0.0 / below tau), never neutral 0.5.
+
+2. Raw clipped cosine is blended as if it were a [0,1] probability; tau is
+   never applied in the blend path (only in unused is_match). Feature score
+   lives in [0.4,1.0], cosine centers at 0.175 with negatives clipped to 0
+   -- scales don't match, so appearance COMPRESSES the ranking instead of
+   sharpening it.
+   FIX: calibrate score_app = sigmoid(10*(cos - tau)); 10 = the exact BCE
+   logit_scale from training (model.py:188), tau from checkpoint.
+
+3. Train/serve z-shape skew: training pads depth to 5 (_pad_or_crop_z);
+   inference never pads. A spine near a z-edge feeds a [3,41,41] tensor at
+   serve vs [5,41,41] at train -- no crash (global pooling), silent
+   off-distribution embedding.
+   FIX: apply the same pad + assert crop shape == cfg.input_shape.
+
+PLUS: tau defaults to 0.5 if the checkpoint key is absent (infer.py:35) --
+fail loud instead.
+
+
+DIVERGENCE (disagreements -> tie-breaker)
+------------------------------------------------------------------------
+- w_app WEIGHT. ML lens: start 0.35, raise toward 0.45-0.5 IF validation
+  confirms. Domain lens: 0.35 is already TOO HIGH -- appearance is least
+  reliable on the plastic spines that matter, weight it lower.
+  RESOLVE BY DATA: start low, move only on held-out evidence. Don't guess.
+
+- PACKAGING ISOLATION. Backend lens: in-process + pip install -e
+  D:\DeepNetSpineMatching into the server venv, torch/monai optional,
+  minimal blast radius -- reject vendoring, avoid a permanent sys.path shim
+  (module-identity pollution: import_backend() prepends the model repo's
+  scripts/ and could load a divergent spine_annotator_backend copy).
+  HTTP microservice = best crash/CUDA isolation but heaviest; reserve as
+  escape hatch only if torch can't coexist with the server venv.
+
+
+OPS HARDENING (backend lens, all real)
+------------------------------------------------------------------------
+- _cached_matcher global has NO lock -- FastAPI's threadpool lets concurrent
+  first-requests each torch.load -> GPU OOM race. Add a double-checked lock.
+- _tiff_stats unbounded + unlocked (serves stale stacks, concurrent dict
+  race); get_matcher caches by path only (in-place .pt replace serves stale
+  model) and stores checkpoint_path unresolved (may reload every call).
+  Key caches on path+mtime; resolve on store.
+- Biggest latency win: CACHE EMBEDDINGS per (tiff, x, y, z, checkpoint_hash)
+  and cosine over pairs, instead of score_coords re-encoding both crops per
+  candidate row.
+
+
+SCIENTIFIC GUARDRAILS (domain lens -- do not skip)
+------------------------------------------------------------------------
+The model can ONLY ever argue FOR a match (it ranks candidate matches; it
+has no "spine is gone" state). NEW/LOST/ARTIFACT are all defined by ABSENCE
+of a match. So appearance systematically nudges annotators toward matched
+-> inflates stable/persistent_engram, deflates measured turnover -- biasing
+the exact headline outcome of a spine-plasticity study.
+
+- Suggest-only, never auto-confirm. Appearance reorders the human's
+  candidate list; the human decides. Don't use tau/is_match to accept.
+- Within-dendrite, within-gate only. Hard negatives were trained
+  within-dendrite; cross-dendrite behavior is untested. Never let a high
+  score_app cross a dendrite or rescue a geometry/link rejection.
+- Acceptance gate = a turnover ON-vs-OFF sensitivity run. Re-run
+  finalize/registry with appearance on and off on the same FOVs; count fate
+  flips and direction. If it net-reduces turnover, that's a flag to show the
+  neuroscientists, not a win.
+- Log score_app + checkpoint hash + crop params per decision in
+  lineage_decisions.json -- otherwise model-assisted lineages aren't
+  reproducible/publishable.
+- Validation is currently leaky. evaluate.py uses random_pair_split --
+  same-lineage pairs scattered across train/val inflates every metric. Use
+  LOFO / lineage-holdout (fovs 1-6 make this feasible), stratify by
+  session-pair and delta-size, report FALSE-MERGE vs FALSE-SPLIT rate not
+  AUROC/accuracy. retrieval_at_1 as written never ranks against real in-gate
+  distractors and reads NaN in the report -- replace it.
+
+
+RECOMMENDED PATH (ordered)
+------------------------------------------------------------------------
+1. Fix the three template bugs (low fill, cosine->sigmoid calibration with
+   checkpoint tau, z-pad + shape assert) and the tau default.
+2. Port the calibrated appearance block into the server's
+   score_candidates_hybrid; add the SPINE_MATCHER_CHECKPOINT env flag +
+   explicit logged status.
+3. Thread TIFF paths through the 5 call sites; add the ops locks + embedding
+   cache.
+4. pip install -e the model repo into the server venv, torch/monai optional;
+   add the crop-provenance hash guard + CI parity test.
+5. Validate on held-out FOVs (LOFO), pick w_app LOW by precision@auto-accept,
+   run the turnover ON/OFF sensitivity analysis before trusting any
+   suggestion in real annotation.
+
+
+KEY FILE REFERENCES
+------------------------------------------------------------------------
+Template (WITH appearance):
+  D:\DeepNetSpineMatching\scripts\spine_annotator_backend\baseline_adapter.py
+    (_add_appearance_scores + re-blend, lines ~220-297)
+Live server (MISSING appearance):
+  D:\spine_match_overtime\scripts\spine_annotator_backend\baseline_adapter.py
+Model:
+  D:\DeepNetSpineMatching\spine_matcher\model.py     (Siamese MONAI ResNet-18)
+  D:\DeepNetSpineMatching\spine_matcher\infer.py     (get_matcher, score_coords)
+  D:\DeepNetSpineMatching\spine_matcher\cache_crops.py (crop + normalization)
+  D:\DeepNetSpineMatching\spine_matcher\dataset.py   (_pad_or_crop_z, splits)
+  D:\DeepNetSpineMatching\spine_matcher\evaluate.py  (metrics / leakage)
+  D:\DeepNetSpineMatching\spine_matcher\config.yaml  (crop 41/41/5, tau)
+  D:\DeepNetSpineMatching\data\checkpoints\GP04\eval_report.json (tau~0.175)
+Call sites to thread TIFF paths:
+  D:\spine_match_overtime\scripts\spine_annotator_backend\app.py:459/564/826
+  D:\spine_match_overtime\scripts\spine_annotator_backend\mtp_spine_matching.py:105/207
+Shared crop/load (parity anchor):
+  D:\learning_project_spines\scripts\...\utils.py (load_stack)
+
+Note: investigation was read-only. Nothing executed or modified in either repo.
+========================================================================
