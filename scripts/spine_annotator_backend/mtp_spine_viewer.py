@@ -648,6 +648,7 @@ def _markers_for_panel_positions(
                 "spine_id": str(sid),
                 "x": float((x - x0) / w * width),
                 "y": float((y - y0) / h * height),
+                "z": float(rec.get("z", 0)),
                 "label": str(rec.get("label") or rec.get("local_spine_id") or sid),
                 "role": "focus"
                 if is_focus

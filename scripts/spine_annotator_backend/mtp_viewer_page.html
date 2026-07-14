@@ -602,8 +602,12 @@ function applyDisplayPixels(pixels, lo, hi, brightness, contrast) {
   return out;
 }
 
-function drawMarkers(ctx, markers) {
+function drawMarkers(ctx, markers, currentZ) {
   for (const m of markers) {
+    // Filter by Z distance: only show labels within ±2 Z slices of current view
+    const mZ = m.z != null ? m.z : 0;
+    if (currentZ != null && Math.abs(mZ - currentZ) > 2) continue;
+
     const x = m.x, y = m.y;
     ctx.font = '10px sans-serif';
     ctx.textAlign = 'center';
@@ -971,7 +975,7 @@ function redrawCanvas(cv, data, tp, mode) {
   const overlays = oofOverlaysForCanvas(cv, tp, data);
   drawOofOverlays(ctx, overlays, cv, tp);
   drawOofLivePreview(ctx, cv);
-  drawMarkers(ctx, data.markers || []);
+  drawMarkers(ctx, data.markers || [], data.z_plane);
   cv._panelData = data;
   cv._bounds = data.stack_bounds;
 }
