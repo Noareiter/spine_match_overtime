@@ -39,6 +39,46 @@ def is_local_decision(td: dict) -> bool:
     return decision_scope(td) == DECISION_SCOPE_LOCAL
 
 
+def validate_contiguity(
+    per_tp: Dict[str, dict],
+    timepoint_names: List[str],
+) -> Optional[str]:
+    """Validate no gaps in matched timepoints. Return error string if invalid, None if OK.
+
+    A valid lineage has matched TPs forming one continuous block: M...M with no C gaps.
+    Patterns like MCMMM (matched, gap, matched) are forbidden.
+    """
+    if not timepoint_names:
+        return None
+
+    # Find first and last matched TP
+    first_match_idx = None
+    last_match_idx = None
+    matched_indices = []
+
+    for i, tp in enumerate(timepoint_names):
+        td = per_tp.get(tp) or {}
+        sid = str(td.get("spine_id") or "").strip()
+        if sid:
+            if first_match_idx is None:
+                first_match_idx = i
+            last_match_idx = i
+            matched_indices.append(i)
+
+    # No matches or single match is always OK
+    if not matched_indices or len(matched_indices) == 1:
+        return None
+
+    # Check for gap: if we have matches but some indices between first and last are missing
+    for i in range(first_match_idx, last_match_idx + 1):
+        if i not in matched_indices:
+            # Found a gap
+            gap_tp = timepoint_names[i]
+            return f"Gap in lineage: spine matched at {timepoint_names[first_match_idx]} and {timepoint_names[last_match_idx]}, but missing at {gap_tp}. Matched timepoints must form one continuous block."
+
+    return None
+
+
 def is_single_tp_focus_ignore(td: dict) -> bool:
     if str(td.get("fate") or "").strip().lower() != "ignore":
         return False
@@ -742,7 +782,44 @@ def save_decision(
         shifts=shifts,
     )
     )
+
+    # Validate contiguity: no gaps allowed
+    contiguity_error = validate_contiguity(finalized, timepoint_names)
+    if contiguity_error:
+        raise ValueError(contiguity_error)
+
     first_seen_tp, _, _, _ = _derive_lineage_summary(finalized, timepoint_names)
+
+    # Check if lineage is empty (all TPs clear + no faith)
+    has_any_match = any(
+        str(finalized.get(tp, {}).get("spine_id") or "").strip()
+        for tp in timepoint_names
+    )
+
+    deleted = False
+    if not has_any_match:
+        # Empty lineage: delete it and return spines to pool
+        for i, row in enumerate(lineages):
+            row_key = str(row.get("lineage_key") or row.get("pre_spine_id") or "").strip()
+            if row_key == key:
+                lineages.pop(i)
+                deleted = True
+                break
+        data["lineages"] = lineages
+        meta["decisions"].write_text(json.dumps(data, indent=2), encoding="utf-8")
+        return {
+            "path": str(meta["decisions"]),
+            "registry_path": "",
+            "disposition_path": "",
+            "coverage": {},
+            "first_seen_tp": "",
+            "last_seen_tp": "",
+            "lost_inferred": False,
+            "censored_from_tp": "",
+            "right_censored": False,
+            "deleted": True,
+        }
+
     entry = {
         "lineage_key": key,
         "pre_spine_id": local_anchor,
@@ -791,6 +868,7 @@ def save_decision(
         "lost_inferred": bool(disappeared_at_tp),
         "censored_from_tp": censored_from_tp,
         "right_censored": right_censored,
+        "deleted": False,
     }
 
 
@@ -1218,16 +1296,18 @@ def mark_reviewed(
 
 
 def _lineage_claim_ids_at_tp(lin: dict, timepoint: str) -> set[str]:
-    """Global/local ids at a timepoint that should leave the orphan pool."""
+    """Global/local ids at a timepoint that should leave the orphan pool.
+
+    Only actively matched spines (spine_id) are claimed. Released spines (removed_spine_id)
+    return to the orphan pool for re-matching elsewhere.
+    """
     out: set[str] = set()
     tp = str(timepoint)
     td = dict((lin.get("per_tp") or {}).get(tp) or {})
-    for sid in (
-        str(td.get("spine_id") or "").strip(),
-        str(td.get("removed_spine_id") or "").strip(),
-    ):
-        if sid:
-            out.add(sid)
+    # Only count spine_id (active match), not removed_spine_id (released)
+    sid = str(td.get("spine_id") or "").strip()
+    if sid:
+        out.add(sid)
     if str(lin.get("pre_timepoint") or "") == tp:
         for sid in (
             str(lin.get("lineage_key") or "").strip(),

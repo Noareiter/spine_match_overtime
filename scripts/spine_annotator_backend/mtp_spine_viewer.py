@@ -27,6 +27,7 @@ from . import (
     ignored_spine_store,
     spine_catalog_store,
     spine_qc_store,
+    spine_qc_tag_store,
     results_final_store,
 )
 
@@ -36,7 +37,8 @@ LOCAL_REG_WINDOW_PX = 40.0
 BLOCKING_FATES = frozenset({"lost"})
 REVIEW_MODE_LINEAGE = "lineage"
 REVIEW_MODE_TIMEPOINT = "timepoint"
-TIMEPOINT_FATES = frozenset({"artifact", "ignore", "new", "lost"})
+# Timepoint mode only supports artifact/ignore — NEW/LOST are derived, never manually set
+TIMEPOINT_FATES = frozenset({"artifact", "ignore"})
 
 
 class _ViewerState:
@@ -112,6 +114,40 @@ def _float_or_none(val) -> Optional[float]:
         return float(val)
     except (TypeError, ValueError):
         return None
+
+
+def _check_contiguity_would_violate(pos_map: Dict[str, dict], timepoint_names: List[str]) -> Optional[str]:
+    """Check if current positions would violate contiguity if saved.
+
+    Returns error message if gap would be created, None if OK.
+    """
+    if not timepoint_names:
+        return None
+
+    first_match_idx = None
+    last_match_idx = None
+    matched_indices = []
+
+    for i, tp in enumerate(timepoint_names):
+        td = pos_map.get(tp) or {}
+        sid = str(td.get("spine_id") or "").strip()
+        if sid:
+            if first_match_idx is None:
+                first_match_idx = i
+            last_match_idx = i
+            matched_indices.append(i)
+
+    # No matches or single match is always OK
+    if not matched_indices or len(matched_indices) == 1:
+        return None
+
+    # Check for gap
+    for i in range(first_match_idx, last_match_idx + 1):
+        if i not in matched_indices:
+            gap_tp = timepoint_names[i]
+            return f"Would create gap: spine matched at {timepoint_names[first_match_idx]} and {timepoint_names[last_match_idx]}, but not at {gap_tp}. Matched timepoints must be contiguous."
+
+    return None
 
 
 def _find_registry_csv(respan: Path, fov: int) -> Optional[Path]:
@@ -228,9 +264,12 @@ def _orphan_spine_ids_at_tp(tp: str, respan: Path) -> List[str]:
         exclude_lineage_key=str(_STATE.active_t1_spine_id or ""),
         pending_lineage=pending,
     )
+    qc_tags = spine_qc_tag_store.load_tags(respan, _STATE.fov)
+    tagged_spines = spine_qc_tag_store.tagged_spines_at_tp(qc_tags, tp)
     orphans = [
         sid for sid in _sort_spine_ids(list(lookup.keys()))
         if sid not in claimed
+        and sid not in tagged_spines
         and not str(sid).startswith("bridge_")
         and not _is_spine_ignored(tp, sid)
     ]
@@ -1097,7 +1136,7 @@ def _fate_options_for_tp(
     pos = positions.get(tp) or {}
     if pos.get("fate_locked"):
         return []
-    return ["artifact", "ignore", "new", "lost"]
+    return ["artifact", "ignore"]
 
 
 def _show_fate_dropdown(tp: str, positions: Dict[str, dict]) -> bool:
@@ -2083,10 +2122,11 @@ def list_t1_spines(offset: int = 0, limit: int = 100) -> T1SpinesResponse:
         if not rec and _STATE.queue_phase_index == 0:
             rec = (_STATE.spine_lookup.get(_STATE.t1_timepoint) or {}).get(sid, {})
         qitem = _queue_item(sid) if _STATE.queue_phase_index == 0 else None
+        local_spine_id = str(rec.get("local_spine_id") or (qitem.get("local_pre_spine_id") if qitem else "") or "")
         items.append(
             {
                 "spine_id": sid,
-                "local_spine_id": str(rec.get("local_spine_id") or qitem.get("local_pre_spine_id") or ""),
+                "local_spine_id": local_spine_id,
                 "anchor_timepoint": anchor_tp,
                 "phase_index": _STATE.queue_phase_index,
                 "dendrite_id": str(rec.get("dendrite_id") or ""),
@@ -2406,6 +2446,9 @@ def accept_suggestion(req: AcceptSuggestionRequest) -> SelectSpineResponse:
                 "source": "accepted_suggestion",
                 "fate": None,
             }
+        contiguity_error = _check_contiguity_would_violate(pos_map, _STATE.timepoint_names)
+        if contiguity_error:
+            raise ValueError(contiguity_error)
         _set_active_positions(_apply_fate_rules(pos_map))
         return _select_spine_response(message=f"Accepted suggestion at {tp}.")
     except Exception as exc:
@@ -2546,6 +2589,9 @@ def add_manual_spine_click(req: AddManualSpineRequest) -> SelectSpineResponse:
         }
         if tp == pre_tp and sid not in _STATE.t1_spine_ids and not _is_duplicate_phase():
             _STATE.t1_spine_ids.append(sid)
+        contiguity_error = _check_contiguity_would_violate(pos_map, _STATE.timepoint_names)
+        if contiguity_error:
+            raise ValueError(contiguity_error)
         updated = _apply_fate_rules(pos_map)
         _set_active_positions(updated)
         return _select_spine_response(
@@ -2587,6 +2633,9 @@ def set_spine(req: SetSpineRequest) -> SelectSpineResponse:
             "source": "manual",
             "fate": None,
         }
+        contiguity_error = _check_contiguity_would_violate(pos_map, _STATE.timepoint_names)
+        if contiguity_error:
+            raise ValueError(contiguity_error)
         _set_active_positions(_apply_fate_rules(pos_map))
         return _select_spine_response(message=warning)
     except Exception as exc:
@@ -2727,9 +2776,28 @@ def set_fate(req: SetFateRequest) -> SelectSpineResponse:
         allowed = _fate_options_for_tp(tp, pos_map, review_mode=review_mode)
         if fate and fate not in allowed:
             raise ValueError(f"Fate '{fate}' not allowed at '{tp}'.")
-        if fate:
+        respan = _respan_path()
+        if fate and review_mode == REVIEW_MODE_TIMEPOINT and fate in ("artifact", "ignore"):
+            spine_to_tag = pos.get("spine_id") or ""
+            if pos.get("spine_id"):
+                pos["spine_id"] = None
+            spine_qc_tag_store.save_tag(
+                respan, _STATE.fov,
+                timepoint=tp,
+                spine_id=spine_to_tag,
+                tag=fate,
+                animal_id=_STATE.animal_id
+            )
+            pos["fate"] = None
+            pos["removed_spine_id"] = None
+            pos["artifact_mode"] = None
+            pos.pop("decision_scope", None)
+            pos["source"] = "cleared"
+        elif fate:
             _apply_local_fate(pos, fate)
         else:
+            spine_to_clear = pos.get("spine_id") or ""
+            spine_qc_tag_store.clear_tag(respan, _STATE.fov, timepoint=tp, spine_id=spine_to_clear, animal_id=_STATE.animal_id)
             pos["fate"] = None
             pos["spine_id"] = None
             pos["removed_spine_id"] = None
@@ -2737,10 +2805,6 @@ def set_fate(req: SetFateRequest) -> SelectSpineResponse:
             pos.pop("decision_scope", None)
             pos["source"] = "cleared"
         pos_map[tp] = pos
-        if fate and review_mode == REVIEW_MODE_TIMEPOINT:
-            pos_map = spine_lineage_store.release_unbound_matches(
-                pos_map, _STATE.timepoint_names
-            )
         _set_active_positions(_apply_fate_rules(pos_map))
         return _select_spine_response(
             anchor_timepoint=active,
@@ -2767,14 +2831,27 @@ def set_fate_all_tps(req: SetFateAllRequest) -> SelectSpineResponse:
         pos_map = _active_positions()
         if not pos_map:
             raise ValueError("No active spine.")
+        respan = _respan_path()
         applied: List[str] = []
         for tp in _STATE.timepoint_names:
             pos = dict(pos_map.get(tp) or {})
             if pos.get("fate_locked"):
                 continue
+            spine_to_tag = pos.get("spine_id") or ""
             if pos.get("spine_id"):
                 pos["spine_id"] = None
-            _apply_local_fate(pos, fate)
+            spine_qc_tag_store.save_tag(
+                respan, _STATE.fov,
+                timepoint=tp,
+                spine_id=spine_to_tag,
+                tag=fate,
+                animal_id=_STATE.animal_id
+            )
+            pos["fate"] = None
+            pos["removed_spine_id"] = None
+            pos["artifact_mode"] = None
+            pos.pop("decision_scope", None)
+            pos["source"] = "cleared"
             pos_map[tp] = pos
             applied.append(tp)
         if not applied:
