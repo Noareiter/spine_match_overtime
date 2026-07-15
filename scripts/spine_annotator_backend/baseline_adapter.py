@@ -105,8 +105,11 @@ def score_candidates_hybrid(
     w_xy: float = 0.45,
     w_z: float = 0.20,
     w_feat: float = 0.35,
+    w_app: float = 0.0,
     anchors: Optional[List[Dict[str, str]]] = None,
     nearby_xy: float = 140.0,
+    t1_tiff_path: Optional[str] = None,
+    t2_tiff_path: Optional[str] = None,
 ) -> pd.DataFrame:
     if candidates.empty:
         return candidates.copy()
@@ -214,5 +217,98 @@ def score_candidates_hybrid(
     )
     scored["score_toolb_model"] = np.nan
     scored["stability_score"] = _hybrid.compute_stability_proxy(scored, t1_scaled, t2_scaled)
-    return _hybrid.finalize_scores(scored, mode="hybrid_confidence")
+
+    # Add appearance scores if TIFF paths provided and w_app > 0
+    if w_app > 0.0 and t1_tiff_path and t2_tiff_path:
+        scored = _add_appearance_scores(
+            scored,
+            t1_df=t1_df,
+            t2_df=t2_df,
+            t1_tiff_path=t1_tiff_path,
+            t2_tiff_path=t2_tiff_path,
+        )
+
+    out = _hybrid.finalize_scores(scored, mode="hybrid_confidence")
+
+    # Re-blend with appearance scores if available
+    if "score_app" in out.columns and np.isfinite(out["score_app"]).any() and w_app > 0.0:
+        s_feat = out["score_feature_weighted"].fillna(0.0)
+        s_app = out["score_app"].fillna(0.0)
+        stability = out["stability_score"].fillna(0.5)
+        w_feat_eff = max(w_feat, 0.0)
+        w_app_eff = max(w_app, 0.0)
+        w_stab = 0.15
+        denom = w_feat_eff + w_app_eff + w_stab
+        if denom > 0:
+            out["final_score"] = (
+                w_feat_eff * s_feat + w_app_eff * s_app + w_stab * stability
+            ) / denom
+            out["final_score"] = out["final_score"].clip(0.0, 1.0)
+
+    return out
+
+
+def _add_appearance_scores(
+    scored: pd.DataFrame,
+    *,
+    t1_df: pd.DataFrame,
+    t2_df: pd.DataFrame,
+    t1_tiff_path: Optional[str],
+    t2_tiff_path: Optional[str],
+) -> pd.DataFrame:
+    """Optional Siamese appearance score via SPINE_MATCHER_CHECKPOINT.
+
+    Encodes spine crops via pre-trained model and scores cosine similarity,
+    then calibrates to probability space via sigmoid(logit_scale * (cosine - tau)).
+    """
+    out = scored.copy()
+    out["score_app"] = np.nan
+    if not t1_tiff_path or not t2_tiff_path or scored.empty:
+        return out
+    try:
+        import sys
+        from pathlib import Path as _Path
+
+        root = _Path(__file__).resolve().parent.parent.parent
+        if str(root) not in sys.path:
+            sys.path.insert(0, str(root))
+        from spine_matcher.infer import get_matcher
+
+        matcher = get_matcher()
+        if matcher is None:
+            return out
+    except Exception:
+        return out
+
+    t1_by = t1_df.set_index(t1_df["id"].astype(str))
+    t2_by = t2_df.set_index(t2_df["id"].astype(str))
+    tau = getattr(matcher, "tau", 0.175)
+    logit_scale = 10.0
+    apps: List[float] = []
+    for _, r in out.iterrows():
+        t1_id = str(r["t1_spine_id"])
+        t2_id = str(r["t2_spine_id"])
+        if t1_id not in t1_by.index or t2_id not in t2_by.index:
+            apps.append(np.nan)
+            continue
+        p1 = t1_by.loc[t1_id]
+        p2 = t2_by.loc[t2_id]
+        try:
+            sim = matcher.score_coords(
+                t1_tiff_path,
+                float(p1["x"]),
+                float(p1["y"]),
+                float(p1["z"]),
+                t2_tiff_path,
+                float(p2["x"]),
+                float(p2["y"]),
+                float(p2["z"]),
+            )
+            # Calibrate raw cosine with sigmoid(logit_scale * (cosine - tau))
+            calibrated = 1.0 / (1.0 + np.exp(-logit_scale * (sim - tau)))
+            apps.append(float(np.clip(calibrated, 0.0, 1.0)))
+        except Exception:
+            apps.append(np.nan)
+    out["score_app"] = apps
+    return out
 

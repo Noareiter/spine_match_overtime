@@ -463,6 +463,8 @@ def _refresh_algo_matches(session: session_store.LoadedSession, use_anchors: boo
         anchors=anchors,
         nearby_xy=nearby_xy,
         gating_z=zmax,
+        t1_tiff_path=getattr(session, "t1_tiff_path", None),
+        t2_tiff_path=getattr(session, "t2_tiff_path", None),
     ).sort_values("final_score", ascending=False)
 
     taken_t2 = set(manual_t2).union(set(str(k) for k in existing_algo.keys()))
@@ -568,6 +570,8 @@ def _build_review_queue(
         anchors=anchors if use_local_registration else None,
         nearby_xy=nearby_xy,
         gating_z=zmax,
+        t1_tiff_path=getattr(session, "t1_tiff_path", None),
+        t2_tiff_path=getattr(session, "t2_tiff_path", None),
     )
     scored = scored.sort_values(["t2_spine_id", "final_score"], ascending=[True, False]).copy()
 
@@ -830,6 +834,8 @@ def _build_top5_next() -> models.Top5NextResponse:
             anchors=None,
             nearby_xy=140.0,
             gating_z=zmax,
+            t1_tiff_path=getattr(session, "t1_tiff_path", None),
+            t2_tiff_path=getattr(session, "t2_tiff_path", None),
         ).sort_values("final_score", ascending=False)
         top = scored.head(5)
         candidates: list[models.Top5Candidate] = []

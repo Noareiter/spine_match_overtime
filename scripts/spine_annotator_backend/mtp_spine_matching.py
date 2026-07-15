@@ -99,11 +99,15 @@ def _rank_pre_mid(
     mid_df: pd.DataFrame,
     *,
     cross_dendrite: bool,
+    pre_tiff_path: Optional[str] = None,
+    mid_tiff_path: Optional[str] = None,
 ) -> List[dict]:
     if not rows:
         return []
     scored = baseline_adapter.score_candidates_hybrid(
-        pd.DataFrame(rows), pre_df, mid_df, gating_z=MAX_Z
+        pd.DataFrame(rows), pre_df, mid_df, gating_z=MAX_Z,
+        t1_tiff_path=pre_tiff_path,
+        t2_tiff_path=mid_tiff_path,
     ).sort_values("final_score", ascending=False)
     best: Dict[str, dict] = {}
     pre_by = pre_df.set_index(pre_df["id"].astype(str))
@@ -176,6 +180,8 @@ def _score_pairwise_best(
     t1_tp: str,
     t2_tp: str,
     allow_cross: bool,
+    t1_tiff_path: Optional[str] = None,
+    t2_tiff_path: Optional[str] = None,
 ) -> Optional[dict]:
     if t1_id not in set(t1_df["id"].astype(str)):
         return None
@@ -205,7 +211,9 @@ def _score_pairwise_best(
     if not rows:
         return None
     scored = baseline_adapter.score_candidates_hybrid(
-        pd.DataFrame(rows), t1_df, t2_df, gating_z=MAX_Z
+        pd.DataFrame(rows), t1_df, t2_df, gating_z=MAX_Z,
+        t1_tiff_path=t1_tiff_path,
+        t2_tiff_path=t2_tiff_path,
     ).sort_values("final_score", ascending=False)
     top = scored.iloc[0]
     t2_id = str(top["t2_spine_id"])
