@@ -156,15 +156,6 @@ def get_fov_inventory(fov: int = 1, timepoints: str = "") -> FovInventoryRespons
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-class ResetFovResponse(BaseModel):
-    ok: bool
-    fov: int
-    removed: List[str] = Field(default_factory=list)
-    kept: List[str] = Field(default_factory=list)
-    backup_dir: str = ""
-    message: str = ""
-
-
 class RebuildRegistryResponse(BaseModel):
     ok: bool
     fov: int
@@ -196,28 +187,5 @@ def rebuild_registry(fov: int = 1) -> RebuildRegistryResponse:
             timepoint_names=tps,
             message=f"Rebuilt registry with {n} lineage(s), {len(tps)} timepoint column(s).",
         )
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@router.post("/reset-fov", response_model=ResetFovResponse)
-def reset_fov_workspace(
-    fov: int = 1,
-    backup: bool = True,
-    keep_dendrite_links: bool = False,
-) -> ResetFovResponse:
-    """Clear annotator metadata for one FOV. Set keep_dendrite_links=true to preserve dendrite links."""
-    try:
-        from . import fov_reset
-
-        cfg = animal_config.load_config()
-        respan = animal_config.require_respan(cfg)
-        result = fov_reset.reset_fov_annotator(
-            respan,
-            int(fov),
-            backup=bool(backup),
-            keep_dendrite_links=bool(keep_dendrite_links),
-        )
-        return ResetFovResponse(ok=True, **result)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
