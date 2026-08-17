@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import importlib.util
 import re
 import sys
@@ -9,7 +10,25 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from . import animal_config
+from . import animal_config, dendrite_link_store
+
+INVENTORY_FILENAME = "fov_inventory.csv"
+INVENTORY_COLUMNS = [
+    "row_type",
+    "animal_id",
+    "fov",
+    "timepoint",
+    "folder",
+    "csv_path",
+    "tiff_path",
+    "spine_count",
+    "dendrite_ids",
+    "missing",
+    "active",
+    "t1_timepoint",
+    "t2_timepoint",
+    "pair_label",
+]
 
 _DETECTED_SPINES_RE = re.compile(r"^fov(\d+).*detected_spines.*\.csv$", re.IGNORECASE)
 _TIFF_FOV_RE = re.compile(r"^fov(\d+)(?:[_\-.].*)?\.(?:tif|tiff)$", re.IGNORECASE)
@@ -224,13 +243,64 @@ def build_fov_inventory(
     for t1, t2 in animal_config.workflow_pairs_for_timepoints(active_names):
         pairs.append({"t1_timepoint": t1, "t2_timepoint": t2, "label": f"{t1} → {t2}"})
 
-    return FovInventory(
+    inv = FovInventory(
         animal_id=animal_id or cfg.animal_id,
         fov=fov,
         respan_root=str(respan_root),
         timepoints=rows,
         workflow_pairs=pairs,
     )
+    write_fov_inventory_csv(inv, all_rows=all_rows, active_set=active_set)
+    return inv
+
+
+def inventory_path(respan_root: Path, fov: int) -> Path:
+    return dendrite_link_store.annotator_meta_dir(respan_root, fov) / INVENTORY_FILENAME
+
+
+def write_fov_inventory_csv(
+    inv: FovInventory,
+    *,
+    all_rows: List[TimepointFiles],
+    active_set: set[str],
+) -> Path:
+    """Document every discovered timepoint (not just the active subset) plus
+    the resolved workflow pairs, so the on-disk record matches what the app
+    actually saw at load time, regardless of which timepoints are selected.
+    """
+    path = inventory_path(Path(inv.respan_root), inv.fov)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8-sig") as fh:
+        writer = csv.DictWriter(fh, fieldnames=INVENTORY_COLUMNS, extrasaction="ignore")
+        writer.writeheader()
+        for row in all_rows:
+            writer.writerow(
+                {
+                    "row_type": "timepoint",
+                    "animal_id": inv.animal_id,
+                    "fov": inv.fov,
+                    "timepoint": row.name,
+                    "folder": row.folder,
+                    "csv_path": row.csv_path or "",
+                    "tiff_path": row.tiff_path or "",
+                    "spine_count": row.spine_count,
+                    "dendrite_ids": ";".join(row.dendrite_ids),
+                    "missing": ";".join(row.missing),
+                    "active": row.name in active_set,
+                }
+            )
+        for pair in inv.workflow_pairs:
+            writer.writerow(
+                {
+                    "row_type": "workflow_pair",
+                    "animal_id": inv.animal_id,
+                    "fov": inv.fov,
+                    "t1_timepoint": pair.get("t1_timepoint", ""),
+                    "t2_timepoint": pair.get("t2_timepoint", ""),
+                    "pair_label": pair.get("label", ""),
+                }
+            )
+    return path
 
 
 def list_timepoint_catalog(
