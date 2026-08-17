@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import logging
+import os
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -10,6 +12,8 @@ import pandas as pd
 
 
 from .project_paths import tracking_scripts_root
+
+logger = logging.getLogger(__name__)
 
 _PROJECT_SCRIPTS_DIR = tracking_scripts_root()
 HYBRID_PATH = _PROJECT_SCRIPTS_DIR / "hybrid_tracking" / "track_hybrid.py"
@@ -31,6 +35,24 @@ _spine_utils = _load_module("spine_matching_utils_backend", SPINE_UTILS_PATH)
 LOCAL_REG_WINDOW_PX = 40.0
 # Hard cap: never score or suggest T1–T2 pairs with |Δz| above this (CSV z units).
 MAX_MATCH_Z_GAP = 7.0
+
+_last_appearance_status: Optional[str] = None
+
+
+def _log_appearance_status(status: str, detail: str = "") -> None:
+    """Log appearance-scoring on/off/broken status once per change (not per-pair).
+
+    Makes "disabled" distinguishable from "broken" in server logs instead of
+    both silently no-op-ing identically.
+    """
+    global _last_appearance_status
+    if status == _last_appearance_status:
+        return
+    _last_appearance_status = status
+    msg = f"Appearance scoring status: {status}"
+    if detail:
+        msg += f" ({detail})"
+    logger.info(msg)
 
 
 def load_stack(path: Path) -> np.ndarray:
@@ -95,6 +117,23 @@ def linked_dendrite_map(dendrite_links: List[Dict[str, object]]) -> Dict[str, se
     return out
 
 
+_ENV_W_APP = "SPINE_MATCHER_W_APP"
+
+
+def _resolve_w_app(explicit: Optional[float]) -> float:
+    """Appearance blend weight: explicit arg wins, else SPINE_MATCHER_W_APP, else 0.0 (off)."""
+    if explicit is not None:
+        return float(explicit)
+    raw = os.environ.get(_ENV_W_APP, "")
+    if not raw:
+        return 0.0
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning(f"Ignoring invalid {_ENV_W_APP}={raw!r}; using 0.0")
+        return 0.0
+
+
 def score_candidates_hybrid(
     candidates: pd.DataFrame,
     t1_df: pd.DataFrame,
@@ -105,12 +144,13 @@ def score_candidates_hybrid(
     w_xy: float = 0.45,
     w_z: float = 0.20,
     w_feat: float = 0.35,
-    w_app: float = 0.0,
+    w_app: Optional[float] = None,
     anchors: Optional[List[Dict[str, str]]] = None,
     nearby_xy: float = 140.0,
     t1_tiff_path: Optional[str] = None,
     t2_tiff_path: Optional[str] = None,
 ) -> pd.DataFrame:
+    w_app = _resolve_w_app(w_app)
     if candidates.empty:
         return candidates.copy()
 
@@ -227,6 +267,10 @@ def score_candidates_hybrid(
             t1_tiff_path=t1_tiff_path,
             t2_tiff_path=t2_tiff_path,
         )
+    elif w_app <= 0.0:
+        _log_appearance_status("disabled-weight-zero")
+    else:
+        _log_appearance_status("disabled-no-tiff")
 
     out = _hybrid.finalize_scores(scored, mode="hybrid_confidence")
 
@@ -263,22 +307,24 @@ def _add_appearance_scores(
     """
     out = scored.copy()
     out["score_app"] = np.nan
-    if not t1_tiff_path or not t2_tiff_path or scored.empty:
+    if scored.empty:
         return out
     try:
-        import sys
-        from pathlib import Path as _Path
-
-        root = _Path(__file__).resolve().parent.parent.parent
-        if str(root) not in sys.path:
-            sys.path.insert(0, str(root))
         from spine_matcher.infer import get_matcher
-
-        matcher = get_matcher()
-        if matcher is None:
-            return out
-    except Exception:
+    except Exception as exc:
+        _log_appearance_status("import-failed", str(exc))
         return out
+
+    try:
+        matcher = get_matcher()
+    except Exception as exc:
+        _log_appearance_status("checkpoint-load-failed", str(exc))
+        return out
+    if matcher is None:
+        _log_appearance_status("model-missing", "SPINE_MATCHER_CHECKPOINT unset or checkpoint file not found")
+        return out
+
+    _log_appearance_status("active", f"checkpoint={matcher.checkpoint_path}")
 
     t1_by = t1_df.set_index(t1_df["id"].astype(str))
     t2_by = t2_df.set_index(t2_df["id"].astype(str))

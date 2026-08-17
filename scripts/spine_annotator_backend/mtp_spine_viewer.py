@@ -208,6 +208,11 @@ def _globalize_queue_item(q: dict, pre_tp: str, mid_tp: str) -> dict:
     return out
 
 
+def _tiff_paths_map() -> Dict[str, str]:
+    """Per-timepoint TIFF paths already resolved into _STATE.files at load time."""
+    return {tp: info.get("tiff") or None for tp, info in _STATE.files.items()}
+
+
 def _build_queues() -> None:
     if len(_STATE.timepoint_names) < 2:
         _STATE.spine_queue = []
@@ -226,6 +231,7 @@ def _build_queues() -> None:
         pre_tp=pre_tp,
         mid_tp=mid_tp,
         link_id=_STATE.active_link_id or None,
+        tiff_paths=_tiff_paths_map(),
     )
     _STATE.spine_queue = [_globalize_queue_item(q, pre_tp, mid_tp) for q in main]
     _STATE.cross_dendrite_queue = [_globalize_queue_item(q, pre_tp, mid_tp) for q in cross]
@@ -2231,6 +2237,7 @@ def select_spine(req: SelectSpineRequest) -> SelectSpineResponse:
                 spine_dfs=_STATE.spine_dfs,
                 cross_links=_STATE.dendrite_links,
                 allow_cross_dendrite=_STATE.allow_cross_dendrite,
+                tiff_paths=_tiff_paths_map(),
             )
             positions, shifts, reg_applied = mtp_spine_matching.apply_local_registration(
                 positions,
@@ -2278,6 +2285,7 @@ def select_spine(req: SelectSpineRequest) -> SelectSpineResponse:
                 cross_links=_STATE.dendrite_links,
                 registry_members=reg_members,
                 allow_cross_dendrite=cross or _STATE.allow_cross_dendrite,
+                tiff_paths=_tiff_paths_map(),
             )
             reg_tp = anchor_tp
         else:
@@ -2295,6 +2303,7 @@ def select_spine(req: SelectSpineRequest) -> SelectSpineResponse:
                     spine_dfs=_STATE.spine_dfs,
                     cross_links=_STATE.dendrite_links,
                     allow_cross_dendrite=_STATE.allow_cross_dendrite,
+                    tiff_paths=_tiff_paths_map(),
                 )
             reg_tp = anchor_tp
         positions, shifts, reg_applied = mtp_spine_matching.apply_local_registration(

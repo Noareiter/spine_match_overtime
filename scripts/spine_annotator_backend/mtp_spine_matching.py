@@ -140,6 +140,7 @@ def build_pre_mid_queues(
     pre_tp: str,
     mid_tp: str,
     link_id: Optional[str] = None,
+    tiff_paths: Optional[Dict[str, str]] = None,
 ) -> Tuple[List[dict], List[dict]]:
     """Return (linked_queue, cross_dendrite_queue) sorted by pre→mid score (high first)."""
     pre = pre_df.copy()
@@ -166,8 +167,16 @@ def build_pre_mid_queues(
         )
         cross_rows = []
 
-    main_q = _rank_pre_mid(linked_rows, pre, mid, cross_dendrite=False)
-    cross_q = _rank_pre_mid(cross_rows, pre, mid, cross_dendrite=True)
+    pre_tiff_path = (tiff_paths or {}).get(pre_tp)
+    mid_tiff_path = (tiff_paths or {}).get(mid_tp)
+    main_q = _rank_pre_mid(
+        linked_rows, pre, mid, cross_dendrite=False,
+        pre_tiff_path=pre_tiff_path, mid_tiff_path=mid_tiff_path,
+    )
+    cross_q = _rank_pre_mid(
+        cross_rows, pre, mid, cross_dendrite=True,
+        pre_tiff_path=pre_tiff_path, mid_tiff_path=mid_tiff_path,
+    )
     return main_q, cross_q
 
 
@@ -268,6 +277,7 @@ def build_lineage_positions(
     cross_links: List[dict],
     registry_members: Optional[Dict[str, dict]] = None,
     allow_cross_dendrite: bool = False,
+    tiff_paths: Optional[Dict[str, str]] = None,
 ) -> Dict[str, dict]:
     """Build per-TP positions: pre→mid match, then chain algo; registry overrides."""
     if not timepoint_names:
@@ -306,6 +316,8 @@ def build_lineage_positions(
                 t1_tp=pre_tp,
                 t2_tp=mid_tp,
                 allow_cross=allow_cross_dendrite,
+                t1_tiff_path=(tiff_paths or {}).get(pre_tp),
+                t2_tiff_path=(tiff_paths or {}).get(mid_tp),
             )
             positions[mid_tp] = (
                 _globalize_algo_hit(mid_lookup, best)
@@ -343,6 +355,8 @@ def build_lineage_positions(
                 t1_tp=prev_tp,
                 t2_tp=tp,
                 allow_cross=allow_cross_dendrite,
+                t1_tiff_path=(tiff_paths or {}).get(prev_tp),
+                t2_tiff_path=(tiff_paths or {}).get(tp),
             )
             if best:
                 positions[tp] = _globalize_algo_hit(tp_lookup, best)
@@ -370,6 +384,7 @@ def build_lineage_positions_from_anchor(
     spine_dfs: Dict[str, pd.DataFrame],
     cross_links: List[dict],
     allow_cross_dendrite: bool = False,
+    tiff_paths: Optional[Dict[str, str]] = None,
 ) -> Dict[str, dict]:
     """Build lineage with anchor at any timepoint; chain forward and backward."""
     if not timepoint_names:
@@ -398,6 +413,8 @@ def build_lineage_positions_from_anchor(
                 t1_tp=prev_tp,
                 t2_tp=tp,
                 allow_cross=allow_cross_dendrite,
+                t1_tiff_path=(tiff_paths or {}).get(prev_tp),
+                t2_tiff_path=(tiff_paths or {}).get(tp),
             )
             if best:
                 positions[tp] = _globalize_algo_hit(tp_lookup, best)
@@ -426,6 +443,8 @@ def build_lineage_positions_from_anchor(
                 t1_tp=next_tp,
                 t2_tp=tp,
                 allow_cross=allow_cross_dendrite,
+                t1_tiff_path=(tiff_paths or {}).get(next_tp),
+                t2_tiff_path=(tiff_paths or {}).get(tp),
             )
             if best:
                 positions[tp] = _globalize_algo_hit(tp_lookup, best)
