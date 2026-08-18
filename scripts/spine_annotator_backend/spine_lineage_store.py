@@ -1269,48 +1269,6 @@ def rebuild_registry_wide(
     return meta["registry"]
 
 
-def _append_registry_row(
-    registry_path: Path,
-    animal_id: str,
-    fov: int,
-    pre_spine_id: str,
-    timepoint_names: List[str],
-    per_tp: Dict[str, dict],
-    *,
-    last_seen_tp: str = "",
-    censored_from_tp: str = "",
-    right_censored: bool = False,
-) -> None:
-    """Legacy single-row append — prefer rebuild_registry_wide after each save."""
-    lineage = {
-        "pre_spine_id": pre_spine_id,
-        "pre_timepoint": "",
-        "timepoint_names": list(timepoint_names),
-        "first_seen_tp": "",
-        "last_seen_tp": last_seen_tp,
-        "censored_from_tp": censored_from_tp,
-        "right_censored": right_censored,
-        "per_tp": per_tp,
-    }
-    row = _build_registry_row(animal_id, fov, lineage, timepoint_names)
-    header = _registry_header(timepoint_names)
-    existing: List[dict] = []
-    lineage_id = f"L_{pre_spine_id}"
-    if registry_path.is_file():
-        with registry_path.open(newline="", encoding="utf-8") as fh:
-            reader = csv.DictReader(fh)
-            for r in reader:
-                if str(r.get("lineage_id", "")) == lineage_id:
-                    continue
-                existing.append(r)
-    existing.append({k: row.get(k, "") for k in header})
-    registry_path.parent.mkdir(parents=True, exist_ok=True)
-    with registry_path.open("w", newline="", encoding="utf-8") as fh:
-        writer = csv.DictWriter(fh, fieldnames=header, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(existing)
-
-
 def load_progress(respan: Path, fov: int) -> dict:
     p = paths(respan, fov)["progress"]
     if not p.is_file():
