@@ -2791,6 +2791,7 @@ def set_fate(req: SetFateRequest) -> SelectSpineResponse:
         pos = dict(pos_map.get(tp) or {})
         if pos.get("fate_locked"):
             raise ValueError(f"Fate blocked at '{tp}' (lineage LOST at previous timepoint).")
+        original_spine_id = str(pos.get("spine_id") or "")
         if pos.get("spine_id"):
             if review_mode == REVIEW_MODE_TIMEPOINT and fate:
                 pos["spine_id"] = None
@@ -2803,7 +2804,7 @@ def set_fate(req: SetFateRequest) -> SelectSpineResponse:
             raise ValueError(f"Fate '{fate}' not allowed at '{tp}'.")
         respan = _respan_path()
         if fate and review_mode == REVIEW_MODE_TIMEPOINT and fate in ("artifact", "ignore"):
-            spine_to_tag = pos.get("spine_id") or ""
+            spine_to_tag = original_spine_id
             if pos.get("spine_id"):
                 pos["spine_id"] = None
             spine_qc_tag_store.save_tag(
