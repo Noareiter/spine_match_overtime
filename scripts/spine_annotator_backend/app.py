@@ -7158,7 +7158,7 @@ def export_results(payload: models.ExportResultsRequest | None = None) -> models
         elif req.use_dialog:
             parent_dir = Path(io_service.pick_directory_via_dialog("Choose folder to save exported results")).resolve()
         else:
-            parent_dir = WORKSPACE_ROOT / "results"
+            parent_dir = RESULTS_DIR
         parent_dir.mkdir(parents=True, exist_ok=True)
         custom_name = _safe_export_folder_name(req.output_name) if req.output_name else "spine_annotator_export"
         out_dir = parent_dir / f"{stamp}_{custom_name}"
