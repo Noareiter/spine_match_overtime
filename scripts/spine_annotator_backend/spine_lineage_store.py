@@ -872,6 +872,92 @@ def save_decision(
     }
 
 
+def apply_undo_snapshot(
+    respan: Path,
+    fov: int,
+    stash: dict,
+    *,
+    timepoint_names: Optional[List[str]] = None,
+    ignored_by_tp: Optional[Dict[str, set]] = None,
+) -> dict:
+    """Reverse the most recent save_decision() call using a pre-save stash
+    captured by the caller right before that call (see
+    mtp_spine_viewer.confirm_lineage). Restores the lineage's exact prior
+    state (or removes it if it was newly created), and rolls reviewed_ids /
+    phase_index back to their pre-save values. Single-use: the caller is
+    responsible for clearing its stash after calling this.
+    """
+    key = str(stash.get("lineage_key") or "").strip()
+    if not key:
+        return {"ok": False, "message": "Nothing to undo."}
+
+    meta = paths(respan, fov)
+    data = load_decisions(respan, fov)
+    lineages: List[dict] = [
+        row
+        for row in (data.get("lineages") or [])
+        if str(row.get("lineage_key") or row.get("pre_spine_id") or "").strip() != key
+    ]
+    prior_entry = stash.get("prior_entry")
+    if prior_entry:
+        lineages.append(prior_entry)
+    data["lineages"] = lineages
+    data["updated_at"] = datetime.now(timezone.utc).isoformat()
+    meta["dir"].mkdir(parents=True, exist_ok=True)
+    meta["decisions"].write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    animal_id = str(data.get("animal_id") or "")
+    registry_path = rebuild_registry_wide(respan, fov, animal_id=animal_id)
+    disposition_path = ""
+    coverage: dict = {}
+    try:
+        from . import spine_qc_store
+
+        disp, coverage = spine_qc_store.rebuild_spine_disposition(
+            respan,
+            fov,
+            animal_id=animal_id,
+            timepoint_names=timepoint_names,
+            ignored_by_tp=ignored_by_tp,
+        )
+        disposition_path = str(disp)
+    except Exception:
+        pass
+
+    reviewed_id = str(stash.get("reviewed_id") or "")
+    prog = load_progress(respan, fov)
+    ids = list(prog.get("reviewed_ids") or [])
+    if not stash.get("was_already_reviewed") and reviewed_id in ids:
+        ids.remove(reviewed_id)
+    phase_index = int(stash.get("phase_index", prog.get("phase_index", 0)) or 0)
+    anchor_timepoint = str(stash.get("anchor_timepoint") or prog.get("anchor_timepoint") or "")
+    save_progress(
+        respan,
+        fov,
+        index=int(prog.get("last_pre_spine_index", 0) or 0),
+        reviewed_ids=ids,
+        phase_index=phase_index,
+        anchor_timepoint=anchor_timepoint,
+    )
+
+    return {
+        "ok": True,
+        "lineage_key": key,
+        "spine_id": reviewed_id,
+        "phase_index": phase_index,
+        "anchor_timepoint": anchor_timepoint,
+        "registry_path": str(registry_path),
+        "disposition_path": disposition_path,
+        "coverage": coverage,
+        "restored": bool(prior_entry),
+        "message": (
+            f"Restored prior state of {key}."
+            if prior_entry
+            else f"Removed {key} (was a new lineage) — back to unreviewed."
+        ),
+    }
+
+
 def _status_for_tp(tp_data: dict) -> str:
     if is_single_tp_focus_ignore(tp_data):
         return "single_tp_only"

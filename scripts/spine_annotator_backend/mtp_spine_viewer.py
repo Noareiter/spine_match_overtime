@@ -7,6 +7,7 @@ Local registration runs when a T1 base spine is selected.
 
 from __future__ import annotations
 
+import copy
 import csv
 from datetime import datetime, timezone
 from pathlib import Path
@@ -80,6 +81,7 @@ class _ViewerState:
         self.lineage_b_key: str = ""
         self.conflict_focus_row: str = "a"
         self.coverage_summary: dict = {}
+        self.undo_stash: Optional[dict] = None
 
     def reset(self) -> None:
         self.__init__()
@@ -1869,6 +1871,19 @@ class RestorePositionsRequest(BaseModel):
     positions: Dict[str, dict] = Field(default_factory=dict)
 
 
+class UndoLastDecisionResponse(BaseModel):
+    ok: bool
+    message: str
+    spine_id: Optional[str] = None
+    spine_ids: List[str] = Field(default_factory=list)
+    phase_index: Optional[int] = None
+    anchor_timepoint: Optional[str] = None
+    phase_kind: Optional[str] = None
+    coverage: dict = Field(default_factory=dict)
+    registry_path: str = ""
+    registry_mtime: str = ""
+
+
 # --------------------------------------------------------------------------- #
 # Routes
 # --------------------------------------------------------------------------- #
@@ -2977,6 +2992,17 @@ def confirm_lineage() -> dict:
             if _STATE.catalog
             else anchor_global
         )
+        prior_entry = spine_lineage_store.get_lineage_by_key(respan, _STATE.fov, anchor_global)
+        prior_progress = spine_lineage_store.load_progress(respan, _STATE.fov)
+        _STATE.undo_stash = {
+            "lineage_key": anchor_global,
+            "reviewed_id": str(_STATE.active_t1_spine_id),
+            "was_already_reviewed": str(_STATE.active_t1_spine_id)
+            in (prior_progress.get("reviewed_ids") or []),
+            "phase_index": int(prior_progress.get("phase_index", 0) or 0),
+            "anchor_timepoint": str(prior_progress.get("anchor_timepoint") or ""),
+            "prior_entry": copy.deepcopy(prior_entry) if prior_entry else None,
+        }
         save_info = spine_lineage_store.save_decision(
             respan,
             _STATE.fov,
@@ -3095,6 +3121,55 @@ def confirm_lineage() -> dict:
                     f"0 duplicates · 0 unreviewed."
                 )
         return out
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/undo-last-decision", response_model=UndoLastDecisionResponse)
+def undo_last_decision() -> UndoLastDecisionResponse:
+    """Reverse the single most recent confirm-lineage save: restores the
+    lineage's exact prior state (or removes it if it was a brand-new
+    confirm) and puts the spine back in the unreviewed queue. One level of
+    undo only — a second call with nothing pending returns ok=False.
+    """
+    try:
+        stash = _STATE.undo_stash
+        if not stash:
+            return UndoLastDecisionResponse(ok=False, message="Nothing to undo.")
+        _STATE.undo_stash = None
+        respan = _respan_path()
+        result = spine_lineage_store.apply_undo_snapshot(
+            respan,
+            _STATE.fov,
+            stash,
+            timepoint_names=_STATE.timepoint_names,
+            ignored_by_tp=_STATE.ignored_by_tp,
+        )
+        if not result.get("ok"):
+            return UndoLastDecisionResponse(ok=False, message=result.get("message") or "Nothing to undo.")
+
+        _STATE.review_progress = spine_lineage_store.load_progress(respan, _STATE.fov)
+        _STATE.coverage_summary = dict(result.get("coverage") or {})
+        _STATE.queue_phase_index = int(result.get("phase_index") or 0)
+        _build_phase_queues(respan)
+        _rebuild_spine_id_list()
+        spine_id = str(result.get("spine_id") or "")
+        if spine_id and spine_id in _STATE.t1_spine_ids:
+            _STATE.active_t1_spine_id = spine_id
+
+        reg_path = str(result.get("registry_path") or "")
+        return UndoLastDecisionResponse(
+            ok=True,
+            message=result.get("message") or "Undid last save.",
+            spine_id=spine_id,
+            spine_ids=list(_STATE.t1_spine_ids),
+            phase_index=_STATE.queue_phase_index,
+            anchor_timepoint=str(result.get("anchor_timepoint") or ""),
+            phase_kind=_current_phase_kind(),
+            coverage=dict(result.get("coverage") or {}),
+            registry_path=reg_path,
+            registry_mtime=_registry_mtime_iso(Path(reg_path)) if reg_path else "",
+        )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

@@ -100,6 +100,7 @@
   <button onclick="prevSpine()">← Prev</button>
   <button id="undoBtn" onclick="undoLastChoice()" disabled title="Undo last change on this spine">Undo</button>
   <button id="nextBtn" class="primary" onclick="nextSpine()">Save &amp; next →</button>
+  <button id="undoDecisionBtn" onclick="undoLastDecision()" disabled title="Undo the last Save &amp; next — restores that spine's prior state and puts it back in the queue">Undo last save</button>
   <select id="spinePick" onchange="jumpSpine()" style="min-width:220px"></select>
   <span id="spineIdx" style="font-size:12px;color:var(--muted)"></span>
   <button id="crossBtn" onclick="toggleCrossMode()" style="display:none">Cross-dendrite review</button>
@@ -184,6 +185,7 @@ const S = {
   coverage: {},
   reviewMode: 'lineage',
   pendingOof: null, reviewComplete: false, undoSnapshot: null, fateBusy: false,
+  undoDecisionAvailable: false,
 };
 
 function stripPositionSnapshot(positions) {
@@ -214,6 +216,11 @@ function pushUndo() {
 function clearUndo() {
   S.undoSnapshot = null;
   updateUndoBtn();
+}
+
+function updateUndoDecisionBtn() {
+  const btn = document.getElementById('undoDecisionBtn');
+  if (btn) btn.disabled = !S.undoDecisionAvailable;
 }
 
 function updateUndoBtn() {
@@ -2503,6 +2510,8 @@ async function nextSpine() {
   if (res.registry_path) updateOutputPath(res.registry_path, res.registry_mtime);
   document.getElementById('status').textContent = formatSaveStatus(res);
   ensureLineageMode();
+  S.undoDecisionAvailable = true;
+  updateUndoDecisionBtn();
   if (res.review_complete) {
     showReviewComplete(res);
     return;
@@ -2522,6 +2531,25 @@ async function nextSpine() {
     ensureLineageMode();
     updateNavButtons();
   }
+}
+
+async function undoLastDecision() {
+  if (!S.undoDecisionAvailable) return;
+  let res;
+  try {
+    res = await api('/mtp/viewer/undo-last-decision', { method:'POST' });
+  } catch(err) {
+    document.getElementById('status').textContent = String(err.message || err);
+    return;
+  }
+  S.undoDecisionAvailable = false;
+  updateUndoDecisionBtn();
+  document.getElementById('status').textContent = res.message || (res.ok ? 'Undid last save.' : 'Nothing to undo.');
+  if (!res.ok) return;
+  if (res.registry_path) updateOutputPath(res.registry_path, res.registry_mtime);
+  await applyQueueUpdate(res);
+  const idx = res.spine_id ? S.t1SpineIds.indexOf(res.spine_id) : -1;
+  await selectSpineAt(idx >= 0 ? idx : 0);
 }
 
 function _STATE_hasActive() { return S.t1SpineIds.length > 0; }
@@ -2563,6 +2591,8 @@ async function loadAnimal() {
     setStatus('Loading — step 1/5: config…');
     S.reviewComplete = false;
     clearUndo();
+    S.undoDecisionAvailable = false;
+    updateUndoDecisionBtn();
     const completeBanner = document.getElementById('completeBanner');
     if (completeBanner) completeBanner.classList.remove('open');
     const modeBadge = document.getElementById('modeBadge');
