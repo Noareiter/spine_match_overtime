@@ -1,24 +1,15 @@
-﻿file,field,type,allowed_values,description
+file,field,type,allowed_values,description
 spine_registry_wide.csv,animal_id,fixed,,Animal identifier (e.g. DEMO10 GP04)
 spine_registry_wide.csv,fov,fixed,,Field of view number
-spine_registry_wide.csv,lineage_id,fixed,,Unique lineage ID (e.g. L_3)
-spine_registry_wide.csv,pre_spine_id,fixed,,Spine ID at review anchor
+spine_registry_wide.csv,lineage_id,fixed,,Derived display ID: L_<lineage_key>
+spine_registry_wide.csv,lineage_key,fixed,,Global spine ID (S_*) of the anchor timepoint -- the real join key for this lineage
+spine_registry_wide.csv,pre_spine_id,fixed,,Local (per-CSV) spine ID at the review anchor -- not the same as lineage_key
 spine_registry_wide.csv,anchor_timepoint,fixed,,Timepoint used as review anchor (review phase)
-spine_registry_wide.csv,active_timepoints,fixed,,Semicolon-separated active timepoints in this lineage
 spine_registry_wide.csv,first_seen_tp,fixed,,First timepoint with observed presence (match)
 spine_registry_wide.csv,last_seen_tp,fixed,,Last timepoint with observed presence
-spine_registry_wide.csv,censored_from_tp,fixed,,First censored timepoint (OOF/artifact/ignore; not LOST)
-spine_registry_wide.csv,formation_tp,fixed,,First appearance after gap (new spine)
-spine_registry_wide.csv,lifecycle,fixed,"stable;transient;persistent_engram;right_censored;censored_interval;unclassified",Overall lineage lifecycle class
-spine_registry_wide.csv,lifecycle (stable),enum value,stable,Present continuously across all timepoints
-spine_registry_wide.csv,lifecycle (transient),enum value,transient,Appeared and disappeared within tracking window
-spine_registry_wide.csv,lifecycle (persistent_engram),enum value,persistent_engram,Formation and/or loss without simple stable/transient pattern
-spine_registry_wide.csv,lifecycle (right_censored),enum value,right_censored,Censored through end of follow-up
-spine_registry_wide.csv,lifecycle (censored_interval),enum value,censored_interval,Censored interval mid timeline
-spine_registry_wide.csv,lifecycle (unclassified),enum value,unclassified,Could not classify (e.g. false positive only)
-spine_registry_wide.csv,right_censored,fixed,0;1,Flag: 1 = right-censored follow-up (not lost)
-spine_registry_wide.csv,id_<timepoint>,per_timepoint,,Spine ID at this timepoint
-spine_registry_wide.csv,status_<timepoint>,per_timepoint,"matched;manual;new;lost;artifact;ignored;censored;absent",Human-readable status at timepoint
+spine_registry_wide.csv,id_<timepoint>,per_timepoint,,Global spine ID (S_*) at this timepoint; empty if none
+spine_registry_wide.csv,local_id_<timepoint>,per_timepoint,,Local (per-CSV) spine ID at this timepoint; empty if none
+spine_registry_wide.csv,status_<timepoint>,per_timepoint,"matched;manual;new;lost;artifact;ignored;censored;absent;single_tp_only",Human-readable status at timepoint
 spine_registry_wide.csv,status (matched),enum value,matched,Spine match exists
 spine_registry_wide.csv,status (manual),enum value,manual,Manually added spine
 spine_registry_wide.csv,status (new),enum value,new,New spine first seen here
@@ -27,34 +18,117 @@ spine_registry_wide.csv,status (artifact),enum value,artifact,Artifact / false d
 spine_registry_wide.csv,status (ignored),enum value,ignored,Out-of-focus / not trackable
 spine_registry_wide.csv,status (censored),enum value,censored,Blind spot censored observation
 spine_registry_wide.csv,status (absent),enum value,absent,No match and no fate
+spine_registry_wide.csv,status (single_tp_only),enum value,single_tp_only,"Fate=ignore set locally at this timepoint only (match cleared first, no detection claimed here); see fate=ignore"
 spine_registry_wide.csv,fate_<timepoint>,per_timepoint,"(empty);lost;artifact;new;ignore;false_positive_artifact;false_positive_ignore",Raw fate label at timepoint
 spine_registry_wide.csv,fate (lost),enum value,lost,Inferred or marked lost
 spine_registry_wide.csv,fate (artifact),enum value,artifact,Blind-spot artifact
 spine_registry_wide.csv,fate (new),enum value,new,Inferred new spine after empty gap
-spine_registry_wide.csv,fate (ignore),enum value,ignore,Ignore / OOF
+spine_registry_wide.csv,fate (ignore),enum value,ignore,"Ignore / OOF -- no detection claimed at this timepoint (match must be cleared before this fate can be set)"
 spine_registry_wide.csv,fate (false_positive_artifact),enum value,false_positive_artifact,False positive: algorithm mistake (no spine)
 spine_registry_wide.csv,fate (false_positive_ignore),enum value,false_positive_ignore,False positive: OOF location at all other timepoints
-spine_registry_wide.csv,event_<timepoint>,per_timepoint,appeared_at_*;lost_at_*,Derived event tags at timepoint
-spine_registry_wide.csv,event (appeared_at),pattern,appeared_at_<tp>,New spine appeared at this timepoint
-spine_registry_wide.csv,event (lost_at),pattern,lost_at_<tp>,Lost after this timepoint (not inside it)
+spine_registry_wide.csv,artifact_mode_<timepoint>,per_timepoint,"(empty);blind_spot;false_positive",Artifact classification at timepoint when fate=artifact
 spine_registry_wide.csv,<timepoint>_x,per_timepoint,,Stack X coordinate
 spine_registry_wide.csv,<timepoint>_y,per_timepoint,,Stack Y coordinate
 spine_registry_wide.csv,<timepoint>_z,per_timepoint,,Stack Z coordinate
-spine_registry_wide.csv,n_timepoints_seen,fixed,,Count of timepoints with match/manual/new status
-spine_registry_wide.csv,n_timepoints_continuous,fixed,,Count of timepoints with continuous lineage presence (observed matches)
+_notes,spine_registry_wide.csv merge,,,"In Results final/, merged across every FOV; per-timepoint column blocks always follow the full config timepoint_order, in order, even if a given FOV never touched a timepoint (that FOV's cells are blank for it)."
+spine_registry_derived.csv,lineage_id,fixed,,Derived display ID: L_<lineage_key> -- join to spine_registry_wide.csv on this or lineage_key
+spine_registry_derived.csv,lineage_key,fixed,,Global spine ID (S_*) of the anchor timepoint -- join key
+spine_registry_derived.csv,event_<timepoint>,per_timepoint,appeared_at_<tp>;lost_at_<tp>,Derived formation/loss event tags at timepoint
+spine_registry_derived.csv,event (appeared_at),pattern,appeared_at_<tp>,"First genuine appearance after an unmarked, uncensored gap at this timepoint"
+spine_registry_derived.csv,event (lost_at),pattern,lost_at_<tp>,Last continuously-present timepoint before a confirmed (non-censored) loss
+spine_registry_derived.csv,formation_tp,fixed,,Timepoint of the appeared_at_* event, if any (empty otherwise)
+spine_registry_derived.csv,lifecycle,fixed,"stable;transient;persistent_engram;right_censored;censored_interval;unclassified",Overall lineage lifecycle classification
+spine_registry_derived.csv,lifecycle (stable),enum value,stable,Present continuously across every timepoint the lineage spans
+spine_registry_derived.csv,lifecycle (transient),enum value,transient,"Has both a formation and a loss event, and the presence window is strictly shorter than the full timeline"
+spine_registry_derived.csv,lifecycle (persistent_engram),enum value,persistent_engram,"Has a formation and/or loss event but doesn't fit the simple transient pattern (e.g. formed but never lost by the end of tracking)"
+spine_registry_derived.csv,lifecycle (right_censored),enum value,right_censored,Censored with no clean loss event found and the censoring runs through the last timepoint
+spine_registry_derived.csv,lifecycle (censored_interval),enum value,censored_interval,Censored somewhere in the middle of the timeline (not at the end)
+spine_registry_derived.csv,lifecycle (unclassified),enum value,unclassified,None of the above patterns matched (e.g. false-positive-only lineage)
+spine_registry_derived.csv,right_censored,fixed,0;1,Flag: 1 = right-censored follow-up (not a confirmed loss)
+spine_registry_derived.csv,censored_from_tp,fixed,,First censored timepoint (blind spot / OOF-ignore); not the same as a confirmed lost
+spine_registry_derived.csv,n_timepoints_seen,fixed,,Count of timepoints with status matched/manual/new
+spine_registry_derived.csv,n_timepoints_continuous,fixed,,Count of timepoints counted as continuously present for survival purposes (positively observed matches only)
+spine_registry_derived.csv,active_timepoints,fixed,,Semicolon-separated list of timepoints this lineage actually spans
+_notes,spine_registry_derived.csv,,,"Reconstructs the survival-analysis columns spine_registry_wide.csv no longer carries directly -- these are derived interpretations, not raw observations, so the annotator's primary output only records observations. NOT produced automatically: run `python -m scripts.spine_annotator_backend.postprocess_registry <respan> <fov>` by hand per FOV (default output: _annotator/fov<N>/spine_registry_derived.csv). Join to spine_registry_wide.csv on lineage_id/lineage_key to get the full original column set back."
+spine_disposition.csv,animal_id,fixed,,Animal identifier
+spine_disposition.csv,fov,fixed,,Field of view number
+spine_disposition.csv,global_spine_id,fixed,,Global spine ID (S_*) -- one row per (global_spine_id timepoint) pair
+spine_disposition.csv,timepoint,fixed,,Timepoint of this detection
+spine_disposition.csv,local_spine_id,fixed,,Local (per-CSV) spine ID
+spine_disposition.csv,disposition,fixed,"unreviewed;duplicate_unresolved;duplicate_resolved;pool_ignore;lineage_matched;lineage_new;lineage_lost;lineage_ignore;lineage_artifact",QC disposition of this detection
+spine_disposition.csv,disposition (unreviewed),enum value,unreviewed,Not yet claimed by any lineage or ignore source
+spine_disposition.csv,disposition (duplicate_unresolved),enum value,duplicate_unresolved,Claimed by more than one lineage; conflict not yet resolved
+spine_disposition.csv,disposition (duplicate_resolved),enum value,duplicate_resolved,Duplicate claim resolved to a canonical lineage
+spine_disposition.csv,disposition (pool_ignore),enum value,pool_ignore,Falls inside a drawn out-of-frame (OOF) region
+spine_disposition.csv,disposition (lineage_matched),enum value,lineage_matched,Matched detection within a confirmed lineage
+spine_disposition.csv,disposition (lineage_new),enum value,lineage_new,New-spine detection within a confirmed lineage
+spine_disposition.csv,disposition (lineage_lost),enum value,lineage_lost,Lost-fate detection within a confirmed lineage
+spine_disposition.csv,disposition (lineage_ignore),enum value,lineage_ignore,Ignore-fate detection within a confirmed lineage
+spine_disposition.csv,disposition (lineage_artifact),enum value,lineage_artifact,Artifact-fate detection within a confirmed lineage
+spine_disposition.csv,lineage_key,fixed,,Lineage this detection is claimed by (empty if unreviewed/pool_ignore)
+spine_disposition.csv,status,fixed,,Same per-timepoint status vocabulary as spine_registry_wide.csv status_<timepoint> (empty if not claimed)
+spine_disposition.csv,fate,fixed,,Same raw fate vocabulary as spine_registry_wide.csv fate_<timepoint> (empty if none)
+spine_disposition.csv,event,fixed,,Reserved; not currently populated by build_disposition_rows
+spine_disposition.csv,conflict,fixed,yes;no,Whether this detection is currently claimed by more than one lineage
+spine_disposition.csv,reviewed,fixed,yes;no,Whether this detection has any disposition beyond unreviewed
+_notes,spine_disposition.csv,,,"Full-coverage QC ledger: one row per detection in spine_catalog.csv, reviewed or not -- unlike spine_registry_wide.csv which only has rows for confirmed lineages. Rebuilt alongside the registry on every save/undo/conflict-resolve, and also independently whenever coverage/unreviewed-queue status is computed with a stale cache."
+spine_catalog.csv,global_spine_id,fixed,,Global spine ID (S_*) -- unique per detection, minted here
+spine_catalog.csv,animal_id,fixed,,Animal identifier
+spine_catalog.csv,fov,fixed,,Field of view number
+spine_catalog.csv,timepoint,fixed,,Timepoint of this detection
+spine_catalog.csv,local_spine_id,fixed,,Local (per-CSV) spine ID as it appears in the raw detected-spines CSV
+spine_catalog.csv,x,fixed,,Stack X coordinate
+spine_catalog.csv,y,fixed,,Stack Y coordinate
+spine_catalog.csv,z,fixed,,Stack Z coordinate
+spine_catalog.csv,dendrite_id,fixed,,Local dendrite ID this detection belongs to
+spine_catalog.csv,source_csv,fixed,,Path to the raw detected-spines CSV this row came from
+_notes,spine_catalog.csv,,,"One row per raw detection, every timepoint's detected-spines CSV. This is the ID-mapping layer everything else (registry disposition ignored_spines) joins against via global_spine_id. Rebuilt when stale: missing file a source CSV newer than the catalog or a row-count mismatch."
+dendrite_links_wide.csv,animal_id,fixed,,Animal identifier
+dendrite_links_wide.csv,fov,fixed,,Field of view number
+dendrite_links_wide.csv,link_id,fixed,,Cross-timepoint dendrite link identifier
+dendrite_links_wide.csv,dendrite_id_<timepoint>,per_timepoint,,"Comma-joined local dendrite ID(s) claimed at this timepoint for this link"
+_notes,dendrite_links_wide.csv,,,"One row per user-declared cross-timepoint dendrite link (Phase 0). Only written on explicit ""Save links"", not on load. In Results final/ merged across every FOV with per-timepoint columns following the full config timepoint_order, same as spine_registry_wide.csv."
+ignored_spines.csv,animal_id,fixed,,Animal identifier
+ignored_spines.csv,fov,fixed,,Field of view number
+ignored_spines.csv,timepoint,fixed,,Timepoint this ignore applies to
+ignored_spines.csv,global_spine_id,fixed,,"Global spine ID (S_*) of the ignored detection; empty for source=lineage_fate (no detection exists at that timepoint)"
+ignored_spines.csv,local_spine_id,fixed,,"Local spine ID of the ignored detection; empty for source=lineage_fate"
+ignored_spines.csv,lineage_key,fixed,,"Which lineage's timepoint-gap this is; only populated for source=lineage_fate, empty for oof/qc_tag"
+ignored_spines.csv,source,fixed,"oof;qc_tag;lineage_fate",Which mechanism produced this ignore
+ignored_spines.csv,source (oof),enum value,oof,Spine falls inside a drawn out-of-frame region (ignored_spines.json)
+ignored_spines.csv,source (qc_tag),enum value,qc_tag,"Manually tagged ignore via Timepoint mode (I key) or bulk Tab->I (spine_qc_tags.json)"
+ignored_spines.csv,source (lineage_fate),enum value,lineage_fate,"A timepoint within a confirmed lineage was marked fate=ignore (lineage_decisions.json); no detection was chosen there by definition"
+_notes,ignored_spines.csv,,,"Results final/ only -- no per-FOV counterpart. Synthesized at merge time by unioning the three per-FOV ignore sources above across every FOV/timepoint; this is the one file to check for every spine ever ignored, by any mechanism."
+fov_inventory.csv,row_type,fixed,timepoint;workflow_pair,Which row shape this row uses (see below)
+fov_inventory.csv,animal_id,fixed,,Animal identifier
+fov_inventory.csv,fov,fixed,,Field of view number
+fov_inventory.csv,timepoint,per row_type=timepoint,,Timepoint folder name
+fov_inventory.csv,folder,per row_type=timepoint,,Full path to the timepoint folder
+fov_inventory.csv,csv_path,per row_type=timepoint,,Path to the detected-spines CSV found for this FOV/timepoint (empty if missing)
+fov_inventory.csv,tiff_path,per row_type=timepoint,,Path to the fov<N>.tif stack found for this FOV/timepoint (empty if missing)
+fov_inventory.csv,spine_count,per row_type=timepoint,,Row count of the detected-spines CSV
+fov_inventory.csv,dendrite_ids,per row_type=timepoint,,Semicolon-joined local dendrite IDs present at this timepoint
+fov_inventory.csv,missing,per row_type=timepoint,,"Semicolon-joined list of what's missing: csv and/or tiff"
+fov_inventory.csv,active,per row_type=timepoint,True;False,Whether this timepoint is in the currently active/selected set
+fov_inventory.csv,t1_timepoint,per row_type=workflow_pair,,First timepoint of a resolved T1->T2 comparison pair
+fov_inventory.csv,t2_timepoint,per row_type=workflow_pair,,Second timepoint of a resolved T1->T2 comparison pair
+fov_inventory.csv,pair_label,per row_type=workflow_pair,,Display label for the pair (e.g. "pre-droplet -> end-droplet")
+_notes,fov_inventory.csv,,,"Per-FOV only, not merged into Results final. Documents every discovered timepoint (not just the active subset) plus the resolved workflow pairs. Rewritten in full on every FOV load/inspect."
 lineage_decisions.json,animal_id,metadata,,Animal identifier
 lineage_decisions.json,fov,metadata,,Field of view
 lineage_decisions.json,updated_at,metadata,,Last update timestamp (UTC ISO)
 lineage_decisions.json,lineages,array,,List of saved lineage records
-lineage_decisions.json,pre_spine_id,per lineage,,Anchor spine ID
+lineage_decisions.json,pre_spine_id,per lineage,,Anchor spine ID (local)
 lineage_decisions.json,pre_timepoint,per lineage,,Anchor timepoint
-lineage_decisions.json,timepoint_names,per lineage,,Timepoints in this lineage
+lineage_decisions.json,lineage_key,per lineage,,Global spine ID (S_*) of the anchor -- primary key for this lineage
+lineage_decisions.json,timepoint_names,per lineage,,Timepoints this lineage spans
 lineage_decisions.json,first_seen_tp,per lineage,,First seen timepoint
 lineage_decisions.json,last_seen_tp,per lineage,,Last seen timepoint
 lineage_decisions.json,censored_from_tp,per lineage,,Censored-from timepoint
 lineage_decisions.json,right_censored,per lineage,true;false,Right-censored flag
 lineage_decisions.json,per_tp,per lineage,,Per-timepoint decision dictionary
-lineage_decisions.json,per_tp.spine_id,per timepoint,,Spine ID or empty
+lineage_decisions.json,per_tp.spine_id,per timepoint,,Global spine ID or empty
+lineage_decisions.json,per_tp.local_spine_id,per timepoint,,Local spine ID or empty
 lineage_decisions.json,per_tp.x,per timepoint,,Stack X
 lineage_decisions.json,per_tp.y,per timepoint,,Stack Y
 lineage_decisions.json,per_tp.z,per timepoint,,Stack Z
@@ -67,8 +141,16 @@ lineage_decisions.json,per_tp.continuity,per timepoint,,Continuity metadata if p
 spine_review_progress.json,phase_index,metadata,,Current review phase index (0 = pre)
 spine_review_progress.json,anchor_timepoint,metadata,,Current phase anchor timepoint
 spine_review_progress.json,last_pre_spine_index,metadata,,Last reviewed spine index
-spine_review_progress.json,reviewed_ids,metadata,,Spine IDs already saved
+spine_review_progress.json,reviewed_ids,metadata,,Spine IDs already saved (append order)
 spine_review_progress.json,updated_at,metadata,,Last update
+ignored_spines.json,animal_id,metadata,,Animal identifier
+ignored_spines.json,fov,metadata,,Field of view
+ignored_spines.json,by_tp,metadata,,Timepoint -> list of global spine IDs (S_*) inside a drawn OOF region
+ignored_spines.json,updated_at,metadata,,Last update timestamp (UTC ISO)
+spine_qc_tags.json,animal_id,metadata,,Animal identifier
+spine_qc_tags.json,fov,metadata,,Field of view
+spine_qc_tags.json,by_tp,metadata,,Timepoint -> {global spine ID: artifact|ignore} -- manual per-spine QC tags
+spine_qc_tags.json,updated_at,metadata,,Last update timestamp (UTC ISO)
 dendrite_links.json,link_id,per link,,Link identifier
 dendrite_links.json,members,per link,,Timepoint to dendrite ID mapping
 dendrite_links.json,notes,per link,,Free-text notes
@@ -77,5 +159,13 @@ dendrite_link_progress.json,visited_link_ids,metadata,,Links visited in dendrite
 oof_segments.json,segment_id,per segment,,OOF segment ID
 oof_segments.json,per_tp,per segment,,Shape per timepoint
 timepoint_selection.json,(selected TPs),metadata,,Active timepoints for FOV
-_removed_columns,disappeared_at_tp,removed,,Removed; use last_seen_tp and event_* (lost_at_*)
-_removed_columns,termination_tp,removed,,Removed; use event_* (lost_at_*)
+_removed_columns,disappeared_at_tp,removed,,Removed; use last_seen_tp and event_* (lost_at_*) in spine_registry_derived.csv
+_removed_columns,termination_tp,removed,,Removed; use event_* (lost_at_*) in spine_registry_derived.csv
+_removed_columns,active_timepoints (from spine_registry_wide.csv),moved,,Moved to spine_registry_derived.csv (derived classification not observation)
+_removed_columns,censored_from_tp (from spine_registry_wide.csv),moved,,Moved to spine_registry_derived.csv
+_removed_columns,formation_tp (from spine_registry_wide.csv),moved,,Moved to spine_registry_derived.csv
+_removed_columns,lifecycle (from spine_registry_wide.csv),moved,,Moved to spine_registry_derived.csv
+_removed_columns,right_censored (from spine_registry_wide.csv),moved,,Moved to spine_registry_derived.csv
+_removed_columns,event_<timepoint> (from spine_registry_wide.csv),moved,,Moved to spine_registry_derived.csv
+_removed_columns,n_timepoints_seen (from spine_registry_wide.csv),moved,,Moved to spine_registry_derived.csv
+_removed_columns,n_timepoints_continuous (from spine_registry_wide.csv),moved,,Moved to spine_registry_derived.csv
