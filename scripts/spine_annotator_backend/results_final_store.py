@@ -24,11 +24,37 @@ RESULTS_FINAL_DIRNAME = "Results final"
 MANIFEST_FILENAME = "build_manifest.json"
 
 _MERGE_CSV_NAMES = (
-    "spine_registry_wide.csv",
     "spine_disposition.csv",
     "spine_catalog.csv",
-    "dendrite_links_wide.csv",
 )
+
+# Wide-format files with one column block per timepoint. These need the
+# canonical animal-level timepoint_order for their header, not a naive
+# first-seen-across-FOVs union (see _merge_wide_csv_by_timepoint) --
+# otherwise a FOV missing a middle timepoint pushes another FOV's columns
+# for that timepoint to the end of the header, out of chronological order.
+_REGISTRY_FIXED_COLUMNS = (
+    "animal_id",
+    "fov",
+    "lineage_id",
+    "lineage_key",
+    "pre_spine_id",
+    "anchor_timepoint",
+    "first_seen_tp",
+    "last_seen_tp",
+)
+_REGISTRY_TP_COLUMN_TEMPLATES = (
+    "id_{tp}",
+    "local_id_{tp}",
+    "status_{tp}",
+    "fate_{tp}",
+    "artifact_mode_{tp}",
+    "{tp}_x",
+    "{tp}_y",
+    "{tp}_z",
+)
+_DENDRITE_LINKS_FIXED_COLUMNS = ("animal_id", "fov", "link_id")
+_DENDRITE_LINKS_TP_COLUMN_TEMPLATES = ("dendrite_id_{tp}",)
 
 IGNORED_MERGED_FILENAME = "ignored_spines.csv"
 IGNORED_COLUMNS = (
@@ -181,6 +207,44 @@ def _merge_csv_paths(
     return len(all_rows)
 
 
+def _merge_wide_csv_by_timepoint(
+    labeled_paths: List[Tuple[int, Path]],
+    fixed_columns: Tuple[str, ...],
+    tp_column_templates: Tuple[str, ...],
+    timepoint_order: List[str],
+    out_path: Path,
+) -> int:
+    """Merge wide per-timepoint-column CSVs using the full canonical
+    animal-level timepoint_order for the header, in chronological order --
+    every timepoint gets its column block even if a given FOV never touched
+    it. _merge_csv_paths's naive first-seen-across-FOVs union would instead
+    push a later FOV's columns for a timepoint an earlier FOV lacks to the
+    end of the header, out of order.
+    """
+    all_rows: List[dict] = []
+    for fov, path in labeled_paths:
+        if not path.is_file():
+            continue
+        with path.open(newline="", encoding="utf-8-sig") as fh:
+            for row in csv.DictReader(fh):
+                item = dict(row)
+                if not str(item.get("fov", "")).strip():
+                    item["fov"] = str(fov)
+                all_rows.append(item)
+    if not all_rows:
+        return 0
+    header = list(fixed_columns)
+    for tmpl in tp_column_templates:
+        header += [tmpl.format(tp=tp) for tp in timepoint_order]
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=header, extrasaction="ignore")
+        writer.writeheader()
+        for row in all_rows:
+            writer.writerow({k: row.get(k, "") for k in header})
+    return len(all_rows)
+
+
 def _ignored_spine_rows_for_fov(respan: Path, fov: int, animal_id: str) -> List[dict]:
     """Union every 'ignore' source for one FOV into flat rows.
 
@@ -312,6 +376,19 @@ def build_results_final(
             for fov in target_fovs
         ]
         count = _merge_csv_paths(labeled, out_dir / name)
+        if count:
+            merged_counts[name] = count
+
+    timepoint_order = list(cfg.timepoint_order)
+    for name, fixed_cols, tp_templates in (
+        ("spine_registry_wide.csv", _REGISTRY_FIXED_COLUMNS, _REGISTRY_TP_COLUMN_TEMPLATES),
+        ("dendrite_links_wide.csv", _DENDRITE_LINKS_FIXED_COLUMNS, _DENDRITE_LINKS_TP_COLUMN_TEMPLATES),
+    ):
+        labeled = [
+            (fov, dendrite_link_store.annotator_meta_dir(respan, fov) / name)
+            for fov in target_fovs
+        ]
+        count = _merge_wide_csv_by_timepoint(labeled, fixed_cols, tp_templates, timepoint_order, out_dir / name)
         if count:
             merged_counts[name] = count
 
