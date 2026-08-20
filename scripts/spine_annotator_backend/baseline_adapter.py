@@ -358,3 +358,46 @@ def _add_appearance_scores(
     out["score_app"] = apps
     return out
 
+
+def score_appearance_pair(
+    x1: float,
+    y1: float,
+    z1: float,
+    tiff1: Optional[str],
+    x2: float,
+    y2: float,
+    z2: float,
+    tiff2: Optional[str],
+) -> Tuple[Optional[float], Optional[str]]:
+    """Calibrated appearance score for one confirmed spine pair, for
+    reproducibility persistence (not for ranking/scoring a decision).
+
+    Independent of w_app: always attempts the score when a checkpoint is
+    configured, since recording it does not influence the match itself -
+    the guardrail against appearance silently swaying decisions applies to
+    score_candidates_hybrid()'s blend, not to this audit-only record.
+
+    Returns (score_app, checkpoint_path), or (None, None) if the model
+    isn't configured/importable or inference fails for any reason - never
+    fabricates a value.
+    """
+    if not tiff1 or not tiff2:
+        return None, None
+    try:
+        from spine_matcher.infer import get_matcher
+    except Exception:
+        return None, None
+    try:
+        matcher = get_matcher()
+    except Exception:
+        return None, None
+    if matcher is None:
+        return None, None
+    try:
+        sim = matcher.score_coords(tiff1, x1, y1, z1, tiff2, x2, y2, z2)
+        tau = getattr(matcher, "tau", 0.175)
+        calibrated = 1.0 / (1.0 + np.exp(-10.0 * (sim - tau)))
+        return float(np.clip(calibrated, 0.0, 1.0)), str(matcher.checkpoint_path)
+    except Exception:
+        return None, None
+

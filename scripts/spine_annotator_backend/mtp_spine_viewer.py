@@ -215,6 +215,30 @@ def _tiff_paths_map() -> Dict[str, str]:
     return {tp: info.get("tiff") or None for tp, info in _STATE.files.items()}
 
 
+def _annotate_score_app(per_tp: Dict[str, dict]) -> None:
+    """Attach a reproducibility-only appearance score to each confirmed
+    match in-place, for consecutive timepoint pairs that both have a real
+    spine_id. Best-effort: leaves score_app/score_app_checkpoint absent if
+    the appearance model isn't configured or inference fails."""
+    tiff_paths = _tiff_paths_map()
+    names = _STATE.timepoint_names
+    for i in range(1, len(names)):
+        tp_prev, tp = names[i - 1], names[i]
+        cur = per_tp.get(tp)
+        prev = per_tp.get(tp_prev)
+        if not cur or not prev:
+            continue
+        if not cur.get("spine_id") or not prev.get("spine_id"):
+            continue
+        score, checkpoint = baseline_adapter.score_appearance_pair(
+            float(prev["x"]), float(prev["y"]), float(prev["z"]), tiff_paths.get(tp_prev),
+            float(cur["x"]), float(cur["y"]), float(cur["z"]), tiff_paths.get(tp),
+        )
+        if score is not None:
+            cur["score_app"] = score
+            cur["score_app_checkpoint"] = checkpoint
+
+
 def _build_queues() -> None:
     if len(_STATE.timepoint_names) < 2:
         _STATE.spine_queue = []
@@ -2983,6 +3007,7 @@ def confirm_lineage() -> dict:
         respan = _respan_path()
         anchor_tp = _current_anchor_timepoint()
         per_tp = _save_positions_snapshot()
+        _annotate_score_app(per_tp)
         if _is_unreviewed_phase():
             tp, anchor_global = spine_qc_store.parse_queue_id(_STATE.active_t1_spine_id)
             anchor_tp = tp or anchor_tp
