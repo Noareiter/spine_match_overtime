@@ -35,25 +35,24 @@ spine_match_overtime/
 │   │   ├── dendrite_link_store.py # Persistent dendrite links
 │   │   ├── spine_catalog_store.py # Global spine catalog (S_XXXXX)
 │   │   ├── spine_lineage_store.py # Lineage decisions (fate, matched pairs)
+│   │   ├── mtp_spine_matching.py  # Pre→mid queue + multi-TP lineage-chain scoring
 │   │   ├── manual_spine_store.py  # Manual spine annotations
 │   │   ├── timepoint_selection.py # TP selection per FOV
 │   │   ├── spine_qc_store.py      # QC metadata
+│   │   ├── spine_qc_tag_store.py  # QC ignore/flag tags (Timepoint-mode)
+│   │   ├── animal_layout.py       # FOV/timepoint discovery + fov_inventory.csv
+│   │   ├── results_final_store.py # Merges per-FOV outputs into Results final/
+│   │   ├── postprocess_registry.py # CLI-only: derives event_<tp>/lifecycle columns
 │   │   ├── respan_bootstrap.py    # Workspace layout creation
 │   │   ├── project_paths.py       # Path constants (PROJECT_ROOT, RESULTS_DIR)
 │   │   ├── __main__.py            # Module launcher
 │   │   └── __init__.py
-│   ├── create_spine_logic_demo.py # Demo data generator
-│   ├── build_spine_catalog.py     # Spine catalog builder
-│   ├── open_animal_folders.py     # File explorer opener
-│   └── [assume_t1_t2_onPre/, ...] # Utility scripts (not main flow)
-├── results/
-│   └── demo_spine_logic_lab/      # Demo workspace (created by demo script)
+├── tests/                         # Validation scripts (crop parity, score_app persistence)
+├── results/                        # App session state (workspace/, per-FOV outputs)
 ├── docs/
 │   └── spine_annotator_output_fields.csv # Output field reference
 ├── README.md                      # User-facing overview
-├── HOW_TO_WORK.txt               # Hebrew workflow guide
-├── HOW_TO_WORK_EN.txt            # English workflow guide
-└── QUICK_REFERENCE.html          # Quick reference card
+└── HOW_TO_WORK.txt               # Hebrew workflow guide
 ```
 
 ---
@@ -293,24 +292,17 @@ Each handles persistence of one type of decision/metadata:
 - **manual_spine_store.py** — Manual spine annotations (clicks)
 - **timepoint_selection.py** — Which TPs are active per FOV
 - **spine_qc_store.py** — QC metadata
+- **spine_qc_tag_store.py** — Manual QC ignore/flag tags (`spine_qc_tags.json`, Timepoint-mode)
 - **ignored_spine_store.py**, **oof_segment_store.py** — Out-of-frame & ignore flags
+- **animal_layout.py** — FOV/timepoint discovery, `fov_inventory.csv`
+- **results_final_store.py** — Merges per-FOV outputs (incl. combined `ignored_spines.csv`) into `Results final/`
+- **postprocess_registry.py** — CLI-only: derives `event_<tp>`/`lifecycle` columns; never auto-invoked by the server
 
 ---
 
 ## Running the Application
 
-### **For Demo**
-
-```bash
-# Create demo data first (one-time)
-python scripts/create_spine_logic_demo.py
-
-# Launch demo
-./start_demo_annotator.bat
-# or: python scripts/run_annotator.py --config config/annotator_demo.json
-```
-
-Browser opens to `http://127.0.0.1:8010/mtp/` (Phase 0: dendrite linker) and `http://127.0.0.1:8010/mtp/viewer/` (Phase 1: spine viewer).
+There is currently no demo-data generator or demo config checked into this repo (the prior demo-bootstrap script and `annotator_demo.json` were removed in the production-cleanup pass). To exercise the app against sample data, point `config/annotator.json`'s `workspace` at an existing respan-layout workspace, or use the sibling `DeepNetSpineMatching` repo's demo workspace at `results/demo_spine_logic_lab/` if present on this machine.
 
 ### **For Real Animal Data**
 
@@ -400,7 +392,7 @@ See `docs/spine_annotator_output_fields.csv` for full field reference.
 ## Development Notes
 
 - **Code Style**: No special linting configured; follows standard Python conventions
-- **Testing**: No test suite present; verify via manual demo
+- **Testing**: `tests/` holds targeted validation scripts (crop-provenance parity, `score_app` persistence), run via `python -m unittest discover -s tests`; no broader test suite/CI beyond that — verify other behavior via manual use
 - **Logging**: Uses standard Python logging; also `matching_activity.log` in session state
 - **Browser Compatibility**: Tested on modern Chrome/Edge; uses WebGL for 3D preview
 - **Performance**: Session state is fully in-memory; suitable for one FOV + 2 TPs at a time
@@ -414,7 +406,5 @@ See `docs/spine_annotator_output_fields.csv` for full field reference.
 | User config | `config/annotator.json` |
 | Main server | `scripts/spine_annotator_backend/app.py` |
 | CLI launcher | `scripts/run_annotator.py` |
-| Demo data | `results/demo_spine_logic_lab/` (auto-created) |
 | Session state | `workspace/respan/_annotator/fovN/*.json` |
 | Output files | `workspace/respan/_annotator/fovN/*.csv` |
-| Quick help | `QUICK_REFERENCE.html` (opened on launch) |
