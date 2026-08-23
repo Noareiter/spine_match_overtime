@@ -250,6 +250,12 @@ def _build_queues() -> None:
     mid_df = _STATE.spine_dfs.get(mid_tp)
     if pre_df is None or mid_df is None:
         return
+    claimed_mid_global = _claimed_spine_ids_by_tp().get(mid_tp, set())
+    exclude_mid_ids = (
+        {_STATE.catalog.to_local(mid_tp, gid) for gid in claimed_mid_global}
+        if _STATE.catalog
+        else set(claimed_mid_global)
+    )
     main, cross = mtp_spine_matching.build_pre_mid_queues(
         pre_df,
         mid_df,
@@ -258,6 +264,7 @@ def _build_queues() -> None:
         mid_tp=mid_tp,
         link_id=_STATE.active_link_id or None,
         tiff_paths=_tiff_paths_map(),
+        exclude_mid_ids=exclude_mid_ids,
     )
     _STATE.spine_queue = [_globalize_queue_item(q, pre_tp, mid_tp) for q in main]
     _STATE.cross_dendrite_queue = [_globalize_queue_item(q, pre_tp, mid_tp) for q in cross]
@@ -319,6 +326,24 @@ def _resolve_lineage_key_for_active() -> str:
         if lin:
             return str(lin.get("lineage_key") or lin.get("pre_spine_id") or candidate)
     return active
+
+
+def _claimed_spine_ids_by_tp(exclude_lineage_key: str = "") -> Dict[str, set]:
+    """Global ids already claimed by OTHER saved lineages, per timepoint.
+
+    Used to keep ranking/suggestion (build_lineage_positions*, build_pre_mid_queues)
+    from offering an already-claimed spine as a fresh candidate for a different
+    lineage - a claimed candidate is skipped entirely, falling through to the
+    next-best free one or a coordinate-estimate fallback."""
+    if not _STATE.respan_root:
+        return {}
+    respan = _respan_path()
+    return {
+        tp: spine_lineage_store.claimed_spine_ids_at_tp(
+            respan, _STATE.fov, tp, exclude_lineage_key=exclude_lineage_key
+        )
+        for tp in _STATE.timepoint_names
+    }
 
 
 def _claimed_for_matching(tp: str) -> set[str]:
@@ -2277,6 +2302,7 @@ def select_spine(req: SelectSpineRequest) -> SelectSpineResponse:
                 cross_links=_STATE.dendrite_links,
                 allow_cross_dendrite=_STATE.allow_cross_dendrite,
                 tiff_paths=_tiff_paths_map(),
+                claimed_spine_ids=_claimed_spine_ids_by_tp(exclude_lineage_key=gid),
             )
             positions, shifts, reg_applied = mtp_spine_matching.apply_local_registration(
                 positions,
@@ -2325,6 +2351,7 @@ def select_spine(req: SelectSpineRequest) -> SelectSpineResponse:
                 registry_members=reg_members,
                 allow_cross_dendrite=cross or _STATE.allow_cross_dendrite,
                 tiff_paths=_tiff_paths_map(),
+                claimed_spine_ids=_claimed_spine_ids_by_tp(exclude_lineage_key=spine_id),
             )
             reg_tp = anchor_tp
         else:
@@ -2343,6 +2370,7 @@ def select_spine(req: SelectSpineRequest) -> SelectSpineResponse:
                     cross_links=_STATE.dendrite_links,
                     allow_cross_dendrite=_STATE.allow_cross_dendrite,
                     tiff_paths=_tiff_paths_map(),
+                    claimed_spine_ids=_claimed_spine_ids_by_tp(exclude_lineage_key=spine_id),
                 )
             reg_tp = anchor_tp
         positions, shifts, reg_applied = mtp_spine_matching.apply_local_registration(
