@@ -144,6 +144,36 @@ def comparison_timepoint_for_lineages(
     return timepoint_names[0]
 
 
+BLAST_RADIUS_TRUNCATES = "truncates"
+BLAST_RADIUS_DISSOLVES = "dissolves"
+
+
+def blast_radius_for_lineage_loss(
+    lineage: Optional[dict],
+    timepoint_names: List[str],
+    timepoint: str,
+) -> str:
+    """What happens to `lineage` if it loses its match at `timepoint`.
+
+    'truncates': timepoint is at (or after) the lineage's last present TP --
+      it just ends earlier, the rest of the lineage survives intact.
+    'dissolves': a later TP is still present -- losing timepoint leaves a
+      hole in the middle of the lineage's tracked span.
+    """
+    if not lineage:
+        return ""
+    per_tp = lineage.get("per_tp") or {}
+    try:
+        idx = timepoint_names.index(timepoint)
+    except ValueError:
+        return ""
+    for j in range(idx + 1, len(timepoint_names)):
+        td = per_tp.get(timepoint_names[j]) or {}
+        if spine_lineage_store._tp_is_present(td):
+            return BLAST_RADIUS_DISSOLVES
+    return BLAST_RADIUS_TRUNCATES
+
+
 def find_duplicate_conflicts(
     respan: Path,
     fov: int,
@@ -166,16 +196,27 @@ def find_duplicate_conflicts(
                 continue
             seen.add(cid)
             comp_tp = comparison_timepoint_for_lineages(by_key, uniq, timepoint_names)
-            conflicts.append(
-                {
-                    "conflict_id": cid,
-                    "timepoint": tp,
-                    "comparison_timepoint": comp_tp,
-                    "spine_id": sid,
-                    "lineage_keys": uniq[:2] if len(uniq) == 2 else uniq,
-                    "lineage_count": len(uniq),
-                }
-            )
+            pair = uniq[:2] if len(uniq) == 2 else uniq
+            conflict = {
+                "conflict_id": cid,
+                "timepoint": tp,
+                "comparison_timepoint": comp_tp,
+                "spine_id": sid,
+                "lineage_keys": pair,
+                "lineage_count": len(uniq),
+            }
+            if len(pair) == 2:
+                # Blast radius if this lineage LOSES the contested spine at `tp`
+                # (i.e. the other lineage is kept). Must be visible before the
+                # user commits -- losing a spine mid-lineage dissolves it, while
+                # losing it at the tail just truncates.
+                conflict["blast_radius_a"] = blast_radius_for_lineage_loss(
+                    by_key.get(pair[0]), timepoint_names, tp
+                )
+                conflict["blast_radius_b"] = blast_radius_for_lineage_loss(
+                    by_key.get(pair[1]), timepoint_names, tp
+                )
+            conflicts.append(conflict)
     return conflicts
 
 

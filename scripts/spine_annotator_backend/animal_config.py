@@ -168,6 +168,7 @@ def resolve_paths(cfg: AnimalConfig) -> Dict[str, str]:
             "workspace": "",
             "respan_root": "",
             "results_root": "",
+            "results_final_dir": "",
             "default_fov": str(cfg.default_fov),
             "folder_open_depth": str(cfg.folder_open_depth),
             "config_path": cfg.config_path,
@@ -179,7 +180,8 @@ def resolve_paths(cfg: AnimalConfig) -> Dict[str, str]:
             "animal_id": cfg.animal_id,
             "workspace": str(report.workspace),
             "respan_root": str(respan),
-            "results_root": str(respan / "results"),
+            "results_root": "",
+            "results_final_dir": str(respan / "_annotator" / "Results final"),
             "default_fov": str(cfg.default_fov),
             "folder_open_depth": str(cfg.folder_open_depth),
             "config_path": cfg.config_path,
@@ -196,6 +198,7 @@ def resolve_paths(cfg: AnimalConfig) -> Dict[str, str]:
             "workspace": ws,
             "respan_root": "",
             "results_root": "",
+            "results_final_dir": "",
             "error": str(exc),
             "config_path": cfg.config_path,
         }
@@ -211,6 +214,9 @@ def list_newly_created_folders(report: respan_bootstrap.BootstrapReport) -> List
     seen: set[str] = set()
     out: List[Path] = []
     for rel in report.created:
+        parts = Path(rel).parts
+        if parts and parts[0].lower() == "results":
+            continue
         p = (report.respan / rel).resolve()
         if not p.is_dir():
             continue
@@ -253,7 +259,7 @@ def list_folders_to_open(cfg: AnimalConfig, *, max_depth: Optional[int] = None) 
         except OSError:
             return
         for child in children:
-            if child.name.lower() in {"__pycache__", ".git"}:
+            if child.name.lower() in {"__pycache__", ".git", "results"}:
                 continue
             add(child)
             walk(child, level + 1)

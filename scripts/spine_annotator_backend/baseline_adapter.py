@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import logging
+import os
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -10,6 +12,8 @@ import pandas as pd
 
 
 from .project_paths import tracking_scripts_root
+
+logger = logging.getLogger(__name__)
 
 _PROJECT_SCRIPTS_DIR = tracking_scripts_root()
 HYBRID_PATH = _PROJECT_SCRIPTS_DIR / "hybrid_tracking" / "track_hybrid.py"
@@ -31,6 +35,24 @@ _spine_utils = _load_module("spine_matching_utils_backend", SPINE_UTILS_PATH)
 LOCAL_REG_WINDOW_PX = 40.0
 # Hard cap: never score or suggest T1–T2 pairs with |Δz| above this (CSV z units).
 MAX_MATCH_Z_GAP = 7.0
+
+_last_appearance_status: Optional[str] = None
+
+
+def _log_appearance_status(status: str, detail: str = "") -> None:
+    """Log appearance-scoring on/off/broken status once per change (not per-pair).
+
+    Makes "disabled" distinguishable from "broken" in server logs instead of
+    both silently no-op-ing identically.
+    """
+    global _last_appearance_status
+    if status == _last_appearance_status:
+        return
+    _last_appearance_status = status
+    msg = f"Appearance scoring status: {status}"
+    if detail:
+        msg += f" ({detail})"
+    logger.info(msg)
 
 
 def load_stack(path: Path) -> np.ndarray:
@@ -95,6 +117,23 @@ def linked_dendrite_map(dendrite_links: List[Dict[str, object]]) -> Dict[str, se
     return out
 
 
+_ENV_W_APP = "SPINE_MATCHER_W_APP"
+
+
+def _resolve_w_app(explicit: Optional[float]) -> float:
+    """Appearance blend weight: explicit arg wins, else SPINE_MATCHER_W_APP, else 0.0 (off)."""
+    if explicit is not None:
+        return float(explicit)
+    raw = os.environ.get(_ENV_W_APP, "")
+    if not raw:
+        return 0.0
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning(f"Ignoring invalid {_ENV_W_APP}={raw!r}; using 0.0")
+        return 0.0
+
+
 def score_candidates_hybrid(
     candidates: pd.DataFrame,
     t1_df: pd.DataFrame,
@@ -105,9 +144,13 @@ def score_candidates_hybrid(
     w_xy: float = 0.45,
     w_z: float = 0.20,
     w_feat: float = 0.35,
+    w_app: Optional[float] = None,
     anchors: Optional[List[Dict[str, str]]] = None,
     nearby_xy: float = 140.0,
+    t1_tiff_path: Optional[str] = None,
+    t2_tiff_path: Optional[str] = None,
 ) -> pd.DataFrame:
+    w_app = _resolve_w_app(w_app)
     if candidates.empty:
         return candidates.copy()
 
@@ -214,5 +257,147 @@ def score_candidates_hybrid(
     )
     scored["score_toolb_model"] = np.nan
     scored["stability_score"] = _hybrid.compute_stability_proxy(scored, t1_scaled, t2_scaled)
-    return _hybrid.finalize_scores(scored, mode="hybrid_confidence")
+
+    # Add appearance scores if TIFF paths provided and w_app > 0
+    if w_app > 0.0 and t1_tiff_path and t2_tiff_path:
+        scored = _add_appearance_scores(
+            scored,
+            t1_df=t1_df,
+            t2_df=t2_df,
+            t1_tiff_path=t1_tiff_path,
+            t2_tiff_path=t2_tiff_path,
+        )
+    elif w_app <= 0.0:
+        _log_appearance_status("disabled-weight-zero")
+    else:
+        _log_appearance_status("disabled-no-tiff")
+
+    out = _hybrid.finalize_scores(scored, mode="hybrid_confidence")
+
+    # Re-blend with appearance scores if available
+    if "score_app" in out.columns and np.isfinite(out["score_app"]).any() and w_app > 0.0:
+        s_feat = out["score_feature_weighted"].fillna(0.0)
+        s_app = out["score_app"].fillna(0.0)
+        stability = out["stability_score"].fillna(0.5)
+        w_feat_eff = max(w_feat, 0.0)
+        w_app_eff = max(w_app, 0.0)
+        w_stab = 0.15
+        denom = w_feat_eff + w_app_eff + w_stab
+        if denom > 0:
+            out["final_score"] = (
+                w_feat_eff * s_feat + w_app_eff * s_app + w_stab * stability
+            ) / denom
+            out["final_score"] = out["final_score"].clip(0.0, 1.0)
+
+    return out
+
+
+def _add_appearance_scores(
+    scored: pd.DataFrame,
+    *,
+    t1_df: pd.DataFrame,
+    t2_df: pd.DataFrame,
+    t1_tiff_path: Optional[str],
+    t2_tiff_path: Optional[str],
+) -> pd.DataFrame:
+    """Optional Siamese appearance score via SPINE_MATCHER_CHECKPOINT.
+
+    Encodes spine crops via pre-trained model and scores cosine similarity,
+    then calibrates to probability space via sigmoid(logit_scale * (cosine - tau)).
+    """
+    out = scored.copy()
+    out["score_app"] = np.nan
+    if scored.empty:
+        return out
+    try:
+        from spine_matcher.infer import get_matcher
+    except Exception as exc:
+        _log_appearance_status("import-failed", str(exc))
+        return out
+
+    try:
+        matcher = get_matcher()
+    except Exception as exc:
+        _log_appearance_status("checkpoint-load-failed", str(exc))
+        return out
+    if matcher is None:
+        _log_appearance_status("model-missing", "SPINE_MATCHER_CHECKPOINT unset or checkpoint file not found")
+        return out
+
+    _log_appearance_status("active", f"checkpoint={matcher.checkpoint_path}")
+
+    t1_by = t1_df.set_index(t1_df["id"].astype(str))
+    t2_by = t2_df.set_index(t2_df["id"].astype(str))
+    tau = getattr(matcher, "tau", 0.175)
+    logit_scale = 10.0
+    apps: List[float] = []
+    for _, r in out.iterrows():
+        t1_id = str(r["t1_spine_id"])
+        t2_id = str(r["t2_spine_id"])
+        if t1_id not in t1_by.index or t2_id not in t2_by.index:
+            apps.append(np.nan)
+            continue
+        p1 = t1_by.loc[t1_id]
+        p2 = t2_by.loc[t2_id]
+        try:
+            sim = matcher.score_coords(
+                t1_tiff_path,
+                float(p1["x"]),
+                float(p1["y"]),
+                float(p1["z"]),
+                t2_tiff_path,
+                float(p2["x"]),
+                float(p2["y"]),
+                float(p2["z"]),
+            )
+            # Calibrate raw cosine with sigmoid(logit_scale * (cosine - tau))
+            calibrated = 1.0 / (1.0 + np.exp(-logit_scale * (sim - tau)))
+            apps.append(float(np.clip(calibrated, 0.0, 1.0)))
+        except Exception:
+            apps.append(np.nan)
+    out["score_app"] = apps
+    return out
+
+
+def score_appearance_pair(
+    x1: float,
+    y1: float,
+    z1: float,
+    tiff1: Optional[str],
+    x2: float,
+    y2: float,
+    z2: float,
+    tiff2: Optional[str],
+) -> Tuple[Optional[float], Optional[str]]:
+    """Calibrated appearance score for one confirmed spine pair, for
+    reproducibility persistence (not for ranking/scoring a decision).
+
+    Independent of w_app: always attempts the score when a checkpoint is
+    configured, since recording it does not influence the match itself -
+    the guardrail against appearance silently swaying decisions applies to
+    score_candidates_hybrid()'s blend, not to this audit-only record.
+
+    Returns (score_app, checkpoint_path), or (None, None) if the model
+    isn't configured/importable or inference fails for any reason - never
+    fabricates a value.
+    """
+    if not tiff1 or not tiff2:
+        return None, None
+    try:
+        from spine_matcher.infer import get_matcher
+    except Exception:
+        return None, None
+    try:
+        matcher = get_matcher()
+    except Exception:
+        return None, None
+    if matcher is None:
+        return None, None
+    try:
+        sim = matcher.score_coords(tiff1, x1, y1, z1, tiff2, x2, y2, z2)
+        tau = getattr(matcher, "tau", 0.175)
+        calibrated = 1.0 / (1.0 + np.exp(-10.0 * (sim - tau)))
+        return float(np.clip(calibrated, 0.0, 1.0)), str(matcher.checkpoint_path)
+    except Exception:
+        return None, None
 

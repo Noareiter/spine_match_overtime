@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import importlib.util
 import re
 import sys
@@ -9,26 +10,89 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from . import animal_config
+from . import animal_config, dendrite_link_store
+
+INVENTORY_FILENAME = "fov_inventory.csv"
+INVENTORY_COLUMNS = [
+    "row_type",
+    "animal_id",
+    "fov",
+    "timepoint",
+    "folder",
+    "csv_path",
+    "tiff_path",
+    "spine_count",
+    "dendrite_ids",
+    "missing",
+    "active",
+    "t1_timepoint",
+    "t2_timepoint",
+    "pair_label",
+]
 
 _DETECTED_SPINES_RE = re.compile(r"^fov(\d+).*detected_spines.*\.csv$", re.IGNORECASE)
 _TIFF_FOV_RE = re.compile(r"^fov(\d+)(?:[_\-.].*)?\.(?:tif|tiff)$", re.IGNORECASE)
 _SKIP_DIR_NAMES = {"tables", "results", "old_inffered", "__pycache__"}
 
 
+class _SimpleInputProvenance:
+    """Fallback layout discovery when input_provenance.py is unavailable."""
+
+    @staticmethod
+    def list_respan_timepoint_dirs(respan_root: Path) -> List[Path]:
+        """List all direct subdirectories under respan_root (excluding special dirs)."""
+        dirs = []
+        for child in respan_root.iterdir():
+            if not child.is_dir() or child.name.startswith("_"):
+                continue
+            if child.name.lower() in _SKIP_DIR_NAMES:
+                continue
+            dirs.append(child)
+        return sorted(dirs, key=lambda p: p.name)
+
+    @staticmethod
+    def normalize_timepoint_key(label: str) -> str:
+        """Normalize a timepoint label for comparison."""
+        return label.lower().strip()
+
+    @staticmethod
+    def find_spine_csv(respan_root: Path, timepoint: str, fov: int) -> Path:
+        """Find the detected spines CSV for a given timepoint and FOV."""
+        tp_dir = respan_root / timepoint
+        if not tp_dir.is_dir():
+            raise FileNotFoundError(f"Timepoint dir not found: {tp_dir}")
+        tables = tp_dir / "Tables"
+        if tables.is_dir():
+            for csv in tables.glob(f"fov{fov}*detected_spines*.csv"):
+                return csv
+        raise FileNotFoundError(f"No spine CSV for fov{fov} under {tp_dir}")
+
+    @staticmethod
+    def resolve_timepoint_dir(respan_root: Path, timepoint: str) -> Path:
+        """Resolve a timepoint directory by name."""
+        tp_dir = respan_root / timepoint
+        if not tp_dir.is_dir():
+            raise FileNotFoundError(f"Timepoint directory not found: {tp_dir}")
+        return tp_dir
+
+
 def _import_input_provenance():
+    """Try to import input_provenance.py, fall back to simple implementation if not available."""
     from .project_paths import ASSUME_T1_T2_DIR
 
     prov_path = ASSUME_T1_T2_DIR / "input_provenance.py"
-    if not prov_path.is_file():
-        raise FileNotFoundError(f"input_provenance.py not found: {prov_path}")
-    spec = importlib.util.spec_from_file_location("input_provenance_layout", prov_path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Cannot load {prov_path}")
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules.setdefault("input_provenance_layout", mod)
-    spec.loader.exec_module(mod)
-    return mod
+    if prov_path.is_file():
+        try:
+            spec = importlib.util.spec_from_file_location("input_provenance_layout", prov_path)
+            if spec is not None and spec.loader is not None:
+                mod = importlib.util.module_from_spec(spec)
+                sys.modules.setdefault("input_provenance_layout", mod)
+                spec.loader.exec_module(mod)
+                return mod
+        except Exception:
+            pass
+    # Fallback: use simple implementation
+    return _SimpleInputProvenance()
 
 
 def discover_fovs(respan_root: Path) -> List[int]:
@@ -179,13 +243,64 @@ def build_fov_inventory(
     for t1, t2 in animal_config.workflow_pairs_for_timepoints(active_names):
         pairs.append({"t1_timepoint": t1, "t2_timepoint": t2, "label": f"{t1} → {t2}"})
 
-    return FovInventory(
+    inv = FovInventory(
         animal_id=animal_id or cfg.animal_id,
         fov=fov,
         respan_root=str(respan_root),
         timepoints=rows,
         workflow_pairs=pairs,
     )
+    write_fov_inventory_csv(inv, all_rows=all_rows, active_set=active_set)
+    return inv
+
+
+def inventory_path(respan_root: Path, fov: int) -> Path:
+    return dendrite_link_store.annotator_meta_dir(respan_root, fov) / INVENTORY_FILENAME
+
+
+def write_fov_inventory_csv(
+    inv: FovInventory,
+    *,
+    all_rows: List[TimepointFiles],
+    active_set: set[str],
+) -> Path:
+    """Document every discovered timepoint (not just the active subset) plus
+    the resolved workflow pairs, so the on-disk record matches what the app
+    actually saw at load time, regardless of which timepoints are selected.
+    """
+    path = inventory_path(Path(inv.respan_root), inv.fov)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8-sig") as fh:
+        writer = csv.DictWriter(fh, fieldnames=INVENTORY_COLUMNS, extrasaction="ignore")
+        writer.writeheader()
+        for row in all_rows:
+            writer.writerow(
+                {
+                    "row_type": "timepoint",
+                    "animal_id": inv.animal_id,
+                    "fov": inv.fov,
+                    "timepoint": row.name,
+                    "folder": row.folder,
+                    "csv_path": row.csv_path or "",
+                    "tiff_path": row.tiff_path or "",
+                    "spine_count": row.spine_count,
+                    "dendrite_ids": ";".join(row.dendrite_ids),
+                    "missing": ";".join(row.missing),
+                    "active": row.name in active_set,
+                }
+            )
+        for pair in inv.workflow_pairs:
+            writer.writerow(
+                {
+                    "row_type": "workflow_pair",
+                    "animal_id": inv.animal_id,
+                    "fov": inv.fov,
+                    "t1_timepoint": pair.get("t1_timepoint", ""),
+                    "t2_timepoint": pair.get("t2_timepoint", ""),
+                    "pair_label": pair.get("label", ""),
+                }
+            )
+    return path
 
 
 def list_timepoint_catalog(

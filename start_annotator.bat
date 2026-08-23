@@ -17,7 +17,7 @@ if not defined PY (
   exit /b 1
 )
 
-%PY% -u scripts\run_annotator.py --config config\annotator.json --open-folders
+%PY% -u scripts\run_annotator.py --config config\annotator.json
 set ERR=%ERRORLEVEL%
 echo.
 if %ERR% neq 0 (echo Server exited with error %ERR%.) else (echo Server stopped.)

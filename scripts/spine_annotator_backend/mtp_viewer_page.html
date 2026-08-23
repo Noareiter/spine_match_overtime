@@ -100,6 +100,7 @@
   <button onclick="prevSpine()">← Prev</button>
   <button id="undoBtn" onclick="undoLastChoice()" disabled title="Undo last change on this spine">Undo</button>
   <button id="nextBtn" class="primary" onclick="nextSpine()">Save &amp; next →</button>
+  <button id="undoDecisionBtn" onclick="undoLastDecision()" disabled title="Undo the last Save &amp; next — restores that spine's prior state and puts it back in the queue">Undo last save</button>
   <select id="spinePick" onchange="jumpSpine()" style="min-width:220px"></select>
   <span id="spineIdx" style="font-size:12px;color:var(--muted)"></span>
   <button id="crossBtn" onclick="toggleCrossMode()" style="display:none">Cross-dendrite review</button>
@@ -118,7 +119,7 @@
 </header>
 <div id="outputPathBar" style="padding:4px 14px;font-size:11px;color:var(--muted);background:#fffbeb;border-bottom:1px solid #fde68a;">
   <strong>Output CSV:</strong> <span id="outputPath" title="Updated on Save &amp; next only">(click Load animal)</span>
-  <span style="margin-left:12px;color:#92400e">S-mode A/I/N/L and Tab do not write the CSV — press <strong>Save &amp; next →</strong></span>
+  <span style="margin-left:12px;color:#92400e">Timepoint mode (A/I) and Tab do not write the CSV — press <strong>Save &amp; next →</strong></span>
 </div>
 <div id="tpPick" style="padding:6px 14px;font-size:11px;color:var(--muted);background:#f8fafc;border-bottom:1px solid var(--line);"></div>
 <div class="wrap">
@@ -136,16 +137,17 @@
       <button type="button" id="editRowB" class="edit-row" onclick="setConflictFocus('b')">Edit row B</button>
       <button type="button" onclick="saveConflictEdits('a')">Save row A edits</button>
       <button type="button" onclick="saveConflictEdits('b')">Save row B edits</button>
-      <button type="button" class="keep-a" onclick="resolveConflict('a')">Keep lineage A (finish)</button>
-      <button type="button" class="keep-b" onclick="resolveConflict('b')">Keep lineage B (finish)</button>
+      <button type="button" id="keepBtnA" class="keep-a" onclick="resolveConflict('a')">Keep lineage A (finish)</button>
+      <button type="button" id="keepBtnB" class="keep-b" onclick="resolveConflict('b')">Keep lineage B (finish)</button>
       <span id="conflictHint" style="font-size:11px;color:var(--muted)">Pick Edit A or B (or click a row). Each row: click spines to match · Clear · False+ on fate bar below that row.</span>
     </div>
+    <div id="conflictBlastRadius" style="margin-top:6px;font-size:12px;font-weight:600"></div>
   </div>
   <div class="row-label" id="topRowLabel">Top — zoom-in (click label = select · Force add ON = click to add spine)</div>
   <div class="row-wrap" id="topRowWrap"><div class="grid5" id="zoomRow"></div></div>
   <div class="row-label" id="bottomRowLabel" style="margin-top:12px">Bottom — full FOV (wheel = zoom · Shift+wheel = Z · Fit = whole image)</div>
   <div class="row-wrap" id="bottomRowWrap"><div class="grid5" id="fovRow"></div></div>
-  <div class="legend">Lineage: Tab = clear all · I = ignore all TPs · Save = infer new/lost. Timepoint (S): Tab = clear anchor only · A/I/N/L = anchor only · Save &amp; next when done.</div>
+  <div class="legend">Lineage: Tab = clear all · I = ignore all TPs · Save = infer new/lost. Timepoint (S): Tab = clear anchor only · A/I = anchor only · Save &amp; next when done.</div>
 </div>
 <div class="oof-modal-backdrop" id="oofModalBackdrop">
   <div class="oof-modal" onclick="event.stopPropagation()">
@@ -183,6 +185,7 @@ const S = {
   coverage: {},
   reviewMode: 'lineage',
   pendingOof: null, reviewComplete: false, undoSnapshot: null, fateBusy: false,
+  undoDecisionAvailable: false,
 };
 
 function stripPositionSnapshot(positions) {
@@ -213,6 +216,11 @@ function pushUndo() {
 function clearUndo() {
   S.undoSnapshot = null;
   updateUndoBtn();
+}
+
+function updateUndoDecisionBtn() {
+  const btn = document.getElementById('undoDecisionBtn');
+  if (btn) btn.disabled = !S.undoDecisionAvailable;
 }
 
 function updateUndoBtn() {
@@ -261,8 +269,8 @@ function updatePhaseBadge() {
     : '';
   if (S.reviewMode === 'timepoint') {
     el.textContent = phase
-      ? `${phase} · TIMEPOINT (A/I/N/L)`
-      : 'TIMEPOINT mode (A/I/N/L)';
+      ? `${phase} · TIMEPOINT (A/I)`
+      : 'TIMEPOINT mode (A/I)';
   } else if (S.phaseKind === 'duplicate') {
     const cov = S.coverage || {};
     const covTxt = cov.catalog_total ? ` · ${cov.tagged || 0}/${cov.catalog_total} tagged` : '';
@@ -281,7 +289,7 @@ function updatePhaseBadge() {
     if (S.reviewMode === 'timepoint') {
       btn.textContent = `Timepoint: ${tp} (S)`;
       btn.classList.add('active-tp-mode');
-      btn.title = 'Timepoint mode · A/I/N/L on anchor · Press S for lineage mode';
+      btn.title = 'Timepoint mode · A/I on anchor · Press S for lineage mode';
     } else {
       btn.textContent = 'Lineage mode (S)';
       btn.classList.remove('active-tp-mode');
@@ -349,11 +357,32 @@ function updateConflictUi() {
       btnB.classList.toggle('active-b', S.conflictFocus === 'b');
       btnB.textContent = `Edit row B${S.lineageBKey ? ' ('+S.lineageBKey+')' : ''}`;
     }
+    // Blast radius: what losing the contested spine does to the OTHER lineage.
+    // Must be visible before she commits -- she should never find out which she
+    // picked only after pressing the key.
+    const brA = (S.conflict && S.conflict.blast_radius_a) || ''; // A's fate if A loses (Keep B)
+    const brB = (S.conflict && S.conflict.blast_radius_b) || ''; // B's fate if B loses (Keep A)
+    const descr = (br) => br === 'dissolves' ? 'dissolves (hole mid-lineage)' : br === 'truncates' ? 'truncates (ends earlier, stays valid)' : '';
+    const keepBtnA = document.getElementById('keepBtnA');
+    const keepBtnB = document.getElementById('keepBtnB');
+    if (keepBtnA) keepBtnA.textContent = 'Keep lineage A (finish)' + (brB ? ` — B ${brB}` : '');
+    if (keepBtnB) keepBtnB.textContent = 'Keep lineage B (finish)' + (brA ? ` — A ${brA}` : '');
+    const radiusEl = document.getElementById('conflictBlastRadius');
+    if (radiusEl) {
+      const lines = [];
+      if (brB) lines.push(`Keep A → B ${descr(brB)}`);
+      if (brA) lines.push(`Keep B → A ${descr(brA)}`);
+      radiusEl.innerHTML = lines
+        .map((t) => `<div style="color:${t.includes('dissolves') ? '#dc2626' : '#16a34a'}">${t}</div>`)
+        .join('');
+    }
   } else {
     if (topLbl) topLbl.textContent = 'Top — zoom-in (click label = select · Force add ON = click to add spine)';
     if (botLbl) botLbl.textContent = 'Bottom — full FOV (wheel = zoom · Shift+wheel = Z · Fit = whole image)';
     if (topWrap) topWrap.classList.remove('focus-a');
     if (botWrap) botWrap.classList.remove('focus-b');
+    const radiusEl = document.getElementById('conflictBlastRadius');
+    if (radiusEl) radiusEl.innerHTML = '';
   }
 }
 
@@ -473,9 +502,14 @@ function showReviewComplete(res) {
   }
   if (text) {
     const when = formatFileTime(res && res.registry_mtime);
-    const extra = res && res.registry_path
+    let extra = res && res.registry_path
       ? ' File: ' + res.registry_path + (when ? ' (' + when + ')' : '')
       : '';
+    if (res && res.results_final_dir) {
+      extra += ' Merged output: ' + res.results_final_dir;
+    } else if (res && res.pending_fovs && res.pending_fovs.length) {
+      extra += ' Pending FOV(s): ' + res.pending_fovs.join(', ') + '.';
+    }
     text.textContent = (res && res.message) || ('All spines reviewed.' + extra);
   }
   document.getElementById('status').textContent =
@@ -493,9 +527,13 @@ function maybeShowAlreadyComplete(load) {
   if (queueEmpty && lastPhase && (pendingUnreviewed > 0 || pendingDup > 0)) return false;
   if (queueEmpty && lastPhase && (reviewed.length > 0 || hasRegistry)) {
     showReviewComplete({
-      message: `Loaded ${load.lineage_count || reviewed.length} saved spine(s) from disk — not saved just now.`,
+      message: load.all_fovs_complete && load.results_final_dir
+        ? `All FOVs complete — Results final: ${load.results_final_dir}`
+        : `Loaded ${load.lineage_count || reviewed.length} saved spine(s) from disk — not saved just now.`,
       registry_path: load.registry_path || expectedRegistryPath(load),
       registry_mtime: load.registry_mtime || load.decisions_mtime || '',
+      results_final_dir: load.results_final_dir || '',
+      pending_fovs: load.pending_fovs || [],
     });
     return true;
   }
@@ -571,8 +609,12 @@ function applyDisplayPixels(pixels, lo, hi, brightness, contrast) {
   return out;
 }
 
-function drawMarkers(ctx, markers) {
+function drawMarkers(ctx, markers, currentZ) {
   for (const m of markers) {
+    // Filter by Z distance: only show labels within ±2 Z slices of current view
+    const mZ = m.z != null ? m.z : 0;
+    if (currentZ != null && Math.abs(mZ - currentZ) > 2) continue;
+
     const x = m.x, y = m.y;
     ctx.font = '10px sans-serif';
     ctx.textAlign = 'center';
@@ -940,7 +982,7 @@ function redrawCanvas(cv, data, tp, mode) {
   const overlays = oofOverlaysForCanvas(cv, tp, data);
   drawOofOverlays(ctx, overlays, cv, tp);
   drawOofLivePreview(ctx, cv);
-  drawMarkers(ctx, data.markers || []);
+  drawMarkers(ctx, data.markers || [], data.z_plane);
   cv._panelData = data;
   cv._bounds = data.stack_bounds;
 }
@@ -1832,7 +1874,7 @@ function renderOneFateBar(tp, row, posMap, barId, isFocusRow) {
   }
   const isActive = tp === activeTp;
   const tpFateOpts = (isActive && !p.spine_id && !p.fate_locked)
-    ? ['artifact', 'ignore', 'new', 'lost']
+    ? ['artifact', 'ignore']
     : (p.fate_options || []);
   let opts = '<option value="">— fate —</option>';
   tpFateOpts.forEach(f => {
@@ -1841,7 +1883,7 @@ function renderOneFateBar(tp, row, posMap, barId, isFocusRow) {
   const show = isActive && !p.spine_id && !p.fate_locked;
   const lockNote = p.fate_locked ? ' title="Blocked — lineage LOST at previous timepoint"' : '';
   const shortcutHint = isActive
-    ? '<span style="color:#5b21b6;font-size:10px">A artifact · I single-TP · N new · L lost</span>'
+    ? '<span style="color:#5b21b6;font-size:10px">A artifact · I single-TP</span>'
     : '';
   bar.innerHTML = `${rowTag}${sid} ${fate} ${localNote}
       <select id="fsel_${row}_${esc(tp)}" onchange="setConflictFocus(${rowArg});onFateChange('${tp}',${rowArg})" ${show && !p.fate_locked ? '' : 'style="display:none"'}${lockNote}>${opts}</select>
@@ -1905,7 +1947,7 @@ function updateFateBars() {
     }
     const isActive = tp === activeTp;
     const tpFateOpts = (isActive && !p.spine_id && !p.fate_locked)
-      ? ['artifact', 'ignore', 'new', 'lost']
+      ? ['artifact', 'ignore']
       : (p.fate_options || []);
     let opts = '<option value="">— fate —</option>';
     tpFateOpts.forEach(f => {
@@ -1914,7 +1956,7 @@ function updateFateBars() {
     const show = isActive && !p.spine_id && !p.fate_locked;
     const lockNote = p.fate_locked ? ' title="Blocked — lineage LOST at previous timepoint"' : '';
     const shortcutHint = isActive
-      ? '<span style="color:#5b21b6;font-size:10px">A artifact · I single-TP · N new · L lost</span>'
+      ? '<span style="color:#5b21b6;font-size:10px">A artifact · I single-TP</span>'
       : '';
     bar.innerHTML = `${rowTag}${sid} ${fate} ${localNote}
       <select id="fsel_${esc(tp)}" onchange="onFateChange('${tp}')" ${show && !p.fate_locked ? '' : 'style="display:none"'}${lockNote}>${opts}</select>
@@ -2033,7 +2075,7 @@ function ensureLineageMode() {
 function reviewModeStatusText() {
   const anchor = S.anchorTp || S.timepoints[0] || '';
   return S.reviewMode === 'timepoint'
-    ? `Timepoint mode (${anchor}) · A/I/N/L on physical keys (same as English layout)`
+    ? `Timepoint mode (${anchor}) · A/I on physical keys (same as English layout)`
     : 'Lineage mode · Clear empty TPs → infer new/lost on save';
 }
 
@@ -2097,6 +2139,24 @@ function textInputFocused() {
 }
 
 function onViewerKeydown(e) {
+  // Ctrl combos are handled first since they're excluded by the plain-key guard below.
+  if (e.ctrlKey && !e.altKey && !e.metaKey) {
+    if (e.code === 'KeyZ') {
+      if (textInputFocused()) return;
+      e.preventDefault();
+      e.stopPropagation();
+      undoLastChoice();
+      return;
+    }
+    if (e.code === 'Enter') {
+      if (textInputFocused() || S.reviewComplete) return;
+      e.preventDefault();
+      e.stopPropagation();
+      nextSpine(); // Save & next (same as the Next button / confirm-lineage).
+      return;
+    }
+    return;
+  }
   if (e.ctrlKey || e.altKey || e.metaKey) return;
   if (e.code === 'KeyS') {
     if (textInputFocused()) return;
@@ -2128,16 +2188,69 @@ function onViewerKeydown(e) {
     }
     return;
   }
+  if (e.code === 'Space') {
+    if (textInputFocused()) return;
+    e.preventDefault();
+    e.stopPropagation();
+    jumpUnresolved();
+    return;
+  }
+  if (e.code === 'ArrowLeft' || e.code === 'ArrowRight') {
+    if (textInputFocused() || S.reviewComplete || !S.t1SpineIds.length) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const delta = e.code === 'ArrowLeft' ? -1 : 1;
+    selectSpineAt(S.idx + delta);
+    return;
+  }
+  if (e.code === 'Enter') {
+    if (textInputFocused() || S.reviewComplete || S.reviewMode !== 'timepoint') return;
+    e.preventDefault();
+    e.stopPropagation();
+    const tp = S.anchorTp || S.timepoints[0];
+    if (tp) acceptSuggestion(tp);
+    return;
+  }
   if (S.reviewMode !== 'timepoint' || S.reviewComplete) return;
   const tp = S.anchorTp || S.timepoints[0];
   if (!tp) return;
-  const fateByCode = { KeyA: 'artifact', KeyN: 'new', KeyL: 'lost' };
+  const fateByCode = { KeyA: 'artifact' };
   const fate = fateByCode[e.code];
   if (!fate) return;
   if (textInputFocused()) return;
   e.preventDefault();
   e.stopPropagation();
   setLocalFate(tp, fate);
+}
+
+async function acceptSuggestion(tp) {
+  try {
+    const body = { timepoint: tp };
+    if (S.phaseKind === 'duplicate') body.lineage_row = S.conflictFocus;
+    const res = await api('/mtp/viewer/accept-suggestion', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(body)
+    });
+    applyPositionsResponse(res);
+    document.getElementById('status').textContent = res.message || 'Accepted.';
+    updateHeaders();
+    if (S.phaseKind === 'duplicate') updateHeadersB();
+    updateFateBars();
+    await refreshAll();
+  } catch(err) {
+    document.getElementById('status').textContent = String(err.message || err);
+  }
+}
+
+async function jumpUnresolved() {
+  try {
+    const res = await api('/mtp/viewer/jump-unresolved', { method:'POST' });
+    if (res.review_complete) { showReviewComplete(res); return; }
+    await applyQueueUpdate(res);
+    document.getElementById('status').textContent = res.message || '';
+  } catch(err) {
+    document.getElementById('status').textContent = String(err.message || err);
+  }
 }
 
 function setAddSpineMode(on) {
@@ -2156,7 +2269,7 @@ function toggleAddSpineMode() {
   setAddSpineMode(!S.addSpineMode);
   document.getElementById('status').textContent = S.addSpineMode
     ? 'Force-add mode: every click creates a new manual spine (even on existing labels).'
-    : 'Click spine label to select · Lineage: Clear → infer on save · S = timepoint mode (A/I/N/L)';
+    : 'Click spine label to select · Lineage: Clear → infer on save · S = timepoint mode (A/I)';
 }
 
 function toggleOofMode() {
@@ -2397,6 +2510,8 @@ async function nextSpine() {
   if (res.registry_path) updateOutputPath(res.registry_path, res.registry_mtime);
   document.getElementById('status').textContent = formatSaveStatus(res);
   ensureLineageMode();
+  S.undoDecisionAvailable = true;
+  updateUndoDecisionBtn();
   if (res.review_complete) {
     showReviewComplete(res);
     return;
@@ -2416,6 +2531,25 @@ async function nextSpine() {
     ensureLineageMode();
     updateNavButtons();
   }
+}
+
+async function undoLastDecision() {
+  if (!S.undoDecisionAvailable) return;
+  let res;
+  try {
+    res = await api('/mtp/viewer/undo-last-decision', { method:'POST' });
+  } catch(err) {
+    document.getElementById('status').textContent = String(err.message || err);
+    return;
+  }
+  S.undoDecisionAvailable = false;
+  updateUndoDecisionBtn();
+  document.getElementById('status').textContent = res.message || (res.ok ? 'Undid last save.' : 'Nothing to undo.');
+  if (!res.ok) return;
+  if (res.registry_path) updateOutputPath(res.registry_path, res.registry_mtime);
+  await applyQueueUpdate(res);
+  const idx = res.spine_id ? S.t1SpineIds.indexOf(res.spine_id) : -1;
+  await selectSpineAt(idx >= 0 ? idx : 0);
 }
 
 function _STATE_hasActive() { return S.t1SpineIds.length > 0; }
@@ -2457,6 +2591,8 @@ async function loadAnimal() {
     setStatus('Loading — step 1/5: config…');
     S.reviewComplete = false;
     clearUndo();
+    S.undoDecisionAvailable = false;
+    updateUndoDecisionBtn();
     const completeBanner = document.getElementById('completeBanner');
     if (completeBanner) completeBanner.classList.remove('open');
     const modeBadge = document.getElementById('modeBadge');

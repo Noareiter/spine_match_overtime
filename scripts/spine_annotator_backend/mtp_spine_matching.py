@@ -99,20 +99,28 @@ def _rank_pre_mid(
     mid_df: pd.DataFrame,
     *,
     cross_dendrite: bool,
+    pre_tiff_path: Optional[str] = None,
+    mid_tiff_path: Optional[str] = None,
+    exclude_t2_ids: Optional[Set[str]] = None,
 ) -> List[dict]:
     if not rows:
         return []
     scored = baseline_adapter.score_candidates_hybrid(
-        pd.DataFrame(rows), pre_df, mid_df, gating_z=MAX_Z
+        pd.DataFrame(rows), pre_df, mid_df, gating_z=MAX_Z,
+        t1_tiff_path=pre_tiff_path,
+        t2_tiff_path=mid_tiff_path,
     ).sort_values("final_score", ascending=False)
     best: Dict[str, dict] = {}
     pre_by = pre_df.set_index(pre_df["id"].astype(str))
     mid_by = mid_df.set_index(mid_df["id"].astype(str))
+    exclude = exclude_t2_ids or set()
     for _, r in scored.iterrows():
         pre_id = str(r["t1_spine_id"])
         if pre_id in best:
             continue
         mid_id = str(r["t2_spine_id"])
+        if mid_id in exclude:
+            continue
         if pre_id not in pre_by.index or mid_id not in mid_by.index:
             continue
         pr = pre_by.loc[pre_id]
@@ -136,6 +144,8 @@ def build_pre_mid_queues(
     pre_tp: str,
     mid_tp: str,
     link_id: Optional[str] = None,
+    tiff_paths: Optional[Dict[str, str]] = None,
+    exclude_mid_ids: Optional[Set[str]] = None,
 ) -> Tuple[List[dict], List[dict]]:
     """Return (linked_queue, cross_dendrite_queue) sorted by pre→mid score (high first)."""
     pre = pre_df.copy()
@@ -162,8 +172,18 @@ def build_pre_mid_queues(
         )
         cross_rows = []
 
-    main_q = _rank_pre_mid(linked_rows, pre, mid, cross_dendrite=False)
-    cross_q = _rank_pre_mid(cross_rows, pre, mid, cross_dendrite=True)
+    pre_tiff_path = (tiff_paths or {}).get(pre_tp)
+    mid_tiff_path = (tiff_paths or {}).get(mid_tp)
+    main_q = _rank_pre_mid(
+        linked_rows, pre, mid, cross_dendrite=False,
+        pre_tiff_path=pre_tiff_path, mid_tiff_path=mid_tiff_path,
+        exclude_t2_ids=exclude_mid_ids,
+    )
+    cross_q = _rank_pre_mid(
+        cross_rows, pre, mid, cross_dendrite=True,
+        pre_tiff_path=pre_tiff_path, mid_tiff_path=mid_tiff_path,
+        exclude_t2_ids=exclude_mid_ids,
+    )
     return main_q, cross_q
 
 
@@ -176,6 +196,9 @@ def _score_pairwise_best(
     t1_tp: str,
     t2_tp: str,
     allow_cross: bool,
+    t1_tiff_path: Optional[str] = None,
+    t2_tiff_path: Optional[str] = None,
+    exclude_t2_ids: Optional[Set[str]] = None,
 ) -> Optional[dict]:
     if t1_id not in set(t1_df["id"].astype(str)):
         return None
@@ -183,9 +206,12 @@ def _score_pairwise_best(
     pairwise = dendrite_link_store.to_pairwise_links(cross_links, t1_tp, t2_tp)
     allowed_t1_by_t2 = baseline_adapter.linked_dendrite_map(pairwise) if pairwise else {}
 
+    exclude = exclude_t2_ids or set()
     rows: List[dict] = []
     t1_d = str(t1_row["dendrite_id"])
     for _, t2 in t2_df.iterrows():
+        if str(t2["id"]) in exclude:
+            continue
         t2_d = str(t2["dendrite_id"])
         if pairwise and not allow_cross and t1_d not in allowed_t1_by_t2.get(t2_d, set()):
             continue
@@ -205,7 +231,9 @@ def _score_pairwise_best(
     if not rows:
         return None
     scored = baseline_adapter.score_candidates_hybrid(
-        pd.DataFrame(rows), t1_df, t2_df, gating_z=MAX_Z
+        pd.DataFrame(rows), t1_df, t2_df, gating_z=MAX_Z,
+        t1_tiff_path=t1_tiff_path,
+        t2_tiff_path=t2_tiff_path,
     ).sort_values("final_score", ascending=False)
     top = scored.iloc[0]
     t2_id = str(top["t2_spine_id"])
@@ -260,13 +288,28 @@ def build_lineage_positions(
     cross_links: List[dict],
     registry_members: Optional[Dict[str, dict]] = None,
     allow_cross_dendrite: bool = False,
+    tiff_paths: Optional[Dict[str, str]] = None,
+    claimed_spine_ids: Optional[Dict[str, Set[str]]] = None,
 ) -> Dict[str, dict]:
-    """Build per-TP positions: pre→mid match, then chain algo; registry overrides."""
+    """Build per-TP positions: pre→mid match, then chain algo; registry overrides.
+
+    claimed_spine_ids (global ids per timepoint, claimed by OTHER lineages) are
+    excluded from ranking/suggestion entirely - an already-claimed candidate is
+    never offered as this lineage's match, falling through to the next-best
+    free candidate or a coordinate-estimate fallback.
+    """
     if not timepoint_names:
         return {}
     pre_tp = timepoint_names[0]
     positions: Dict[str, dict] = {}
     registry_members = registry_members or {}
+    claimed_spine_ids = claimed_spine_ids or {}
+
+    def _excluded_local_ids(tp: str) -> Set[str]:
+        lookup = spine_lookup.get(tp) or {}
+        return {
+            _local_id_for_lookup(lookup, gid) for gid in claimed_spine_ids.get(tp, set())
+        }
 
     pre_lookup = spine_lookup.get(pre_tp) or {}
     if str(pre_spine_id) not in pre_lookup:
@@ -285,7 +328,11 @@ def build_lineage_positions(
                 positions[mid_tp] = _pos_from_lookup(
                     mid_lookup, reg_sid, "registry", score=None
                 )
-        elif mid_spine_id and str(mid_spine_id) in mid_lookup:
+        elif (
+            mid_spine_id
+            and str(mid_spine_id) in mid_lookup
+            and str(mid_spine_id) not in claimed_spine_ids.get(mid_tp, set())
+        ):
             positions[mid_tp] = _pos_from_lookup(
                 mid_lookup, str(mid_spine_id), "pre_mid_match", score=None
             )
@@ -298,6 +345,9 @@ def build_lineage_positions(
                 t1_tp=pre_tp,
                 t2_tp=mid_tp,
                 allow_cross=allow_cross_dendrite,
+                t1_tiff_path=(tiff_paths or {}).get(pre_tp),
+                t2_tiff_path=(tiff_paths or {}).get(mid_tp),
+                exclude_t2_ids=_excluded_local_ids(mid_tp),
             )
             positions[mid_tp] = (
                 _globalize_algo_hit(mid_lookup, best)
@@ -335,6 +385,9 @@ def build_lineage_positions(
                 t1_tp=prev_tp,
                 t2_tp=tp,
                 allow_cross=allow_cross_dendrite,
+                t1_tiff_path=(tiff_paths or {}).get(prev_tp),
+                t2_tiff_path=(tiff_paths or {}).get(tp),
+                exclude_t2_ids=_excluded_local_ids(tp),
             )
             if best:
                 positions[tp] = _globalize_algo_hit(tp_lookup, best)
@@ -362,8 +415,14 @@ def build_lineage_positions_from_anchor(
     spine_dfs: Dict[str, pd.DataFrame],
     cross_links: List[dict],
     allow_cross_dendrite: bool = False,
+    tiff_paths: Optional[Dict[str, str]] = None,
+    claimed_spine_ids: Optional[Dict[str, Set[str]]] = None,
 ) -> Dict[str, dict]:
-    """Build lineage with anchor at any timepoint; chain forward and backward."""
+    """Build lineage with anchor at any timepoint; chain forward and backward.
+
+    claimed_spine_ids (global ids per timepoint, claimed by OTHER lineages) are
+    excluded from ranking/suggestion entirely, same as build_lineage_positions.
+    """
     if not timepoint_names:
         return {}
     if anchor_tp not in timepoint_names:
@@ -376,6 +435,13 @@ def build_lineage_positions_from_anchor(
         anchor_tp: _pos_from_lookup(anchor_lookup, aid, "anchor_base"),
     }
     anchor_idx = timepoint_names.index(anchor_tp)
+    claimed_spine_ids = claimed_spine_ids or {}
+
+    def _excluded_local_ids(tp: str) -> Set[str]:
+        lookup = spine_lookup.get(tp) or {}
+        return {
+            _local_id_for_lookup(lookup, gid) for gid in claimed_spine_ids.get(tp, set())
+        }
 
     prev_tp = anchor_tp
     prev_id = aid
@@ -390,6 +456,9 @@ def build_lineage_positions_from_anchor(
                 t1_tp=prev_tp,
                 t2_tp=tp,
                 allow_cross=allow_cross_dendrite,
+                t1_tiff_path=(tiff_paths or {}).get(prev_tp),
+                t2_tiff_path=(tiff_paths or {}).get(tp),
+                exclude_t2_ids=_excluded_local_ids(tp),
             )
             if best:
                 positions[tp] = _globalize_algo_hit(tp_lookup, best)
@@ -418,6 +487,9 @@ def build_lineage_positions_from_anchor(
                 t1_tp=next_tp,
                 t2_tp=tp,
                 allow_cross=allow_cross_dendrite,
+                t1_tiff_path=(tiff_paths or {}).get(next_tp),
+                t2_tiff_path=(tiff_paths or {}).get(tp),
+                exclude_t2_ids=_excluded_local_ids(tp),
             )
             if best:
                 positions[tp] = _globalize_algo_hit(tp_lookup, best)
