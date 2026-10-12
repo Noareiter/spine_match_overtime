@@ -24,7 +24,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from . import baseline_adapter, io_service
-from . import animal_config, dendrite_link_store
+from . import animal_config, dendrite_link_store, ignored_dendrite_store
 
 router = APIRouter(prefix="/mtp", tags=["multi-timepoint-dendrite-linker"])
 
@@ -155,6 +155,12 @@ class StateResponse(BaseModel):
     links: List[dict]
     visited_link_ids: List[str] = Field(default_factory=list)
     catalog_message: str = ""
+    ignored_dendrites: Dict[str, List[str]] = Field(default_factory=dict)
+
+
+class IgnoreDendriteRequest(BaseModel):
+    timepoint: str
+    dendrite_id: str
 
 
 class MarkVisitedRequest(BaseModel):
@@ -214,11 +220,16 @@ def _state_response(*, fov: Optional[int] = None) -> StateResponse:
             )
         )
     visited: List[str] = []
+    ignored_dendrites: Dict[str, List[str]] = {}
     try:
         respan, fov_i = _respan_and_fov()
         if fov is not None:
             fov_i = int(fov)
         visited = list(dendrite_link_store.load_progress(respan, fov_i).get("visited_link_ids", []))
+        ignored_dendrites = {
+            tp: sorted(ids)
+            for tp, ids in ignored_dendrite_store.load_ignored_dendrites(respan, fov_i).items()
+        }
     except Exception:
         pass
     return StateResponse(
@@ -228,6 +239,7 @@ def _state_response(*, fov: Optional[int] = None) -> StateResponse:
         links=_STATE.links,
         visited_link_ids=visited,
         catalog_message=_STATE.catalog_message,
+        ignored_dendrites=ignored_dendrites,
     )
 
 
@@ -408,6 +420,43 @@ def clear_links() -> StateResponse:
     _STATE.links = []
     _STATE.link_counter = 0
     return _state_response()
+
+
+@router.post("/ignore-dendrite", response_model=StateResponse)
+def ignore_dendrite(req: IgnoreDendriteRequest) -> StateResponse:
+    """Ignore every spine on this dendrite at this timepoint: excluded from
+    any match candidacy and listed in the merged ignored_spines.csv."""
+    try:
+        if req.timepoint not in _STATE.timepoint_names:
+            raise ValueError(f"Timepoint '{req.timepoint}' is not loaded.")
+        if not req.dendrite_id.strip():
+            raise ValueError("dendrite_id is required.")
+        respan, fov = _respan_and_fov()
+        ignored_dendrite_store.add_ignored_dendrite(
+            respan, fov,
+            animal_id=_STATE.animal_id,
+            timepoint=req.timepoint,
+            dendrite_id=req.dendrite_id,
+        )
+        return _state_response()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete("/ignore-dendrite/{timepoint}/{dendrite_id}", response_model=StateResponse)
+def unignore_dendrite(timepoint: str, dendrite_id: str) -> StateResponse:
+    try:
+        respan, fov = _respan_and_fov()
+        ignored_dendrite_store.remove_ignored_dendrite(
+            respan, fov, timepoint=timepoint, dendrite_id=dendrite_id
+        )
+        return _state_response()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/auto-link-shared", response_model=StateResponse)
@@ -644,6 +693,10 @@ _PAGE_HTML = """<!doctype html>
   .idchip input { margin:0; pointer-events:none; }
   .swatch { width:10px; height:10px; border-radius:50%; flex:0 0 auto; }
   .idchip .lk { margin-left:auto; font-size:10px; color:var(--accent); }
+  .idchip.ignored { opacity:.55; text-decoration:line-through; }
+  .idchip .ignoretag { margin-left:auto; font-size:10px; color:var(--red); text-decoration:none;
+                        border:1px solid #f1c4c4; border-radius:5px; padding:0 5px; cursor:pointer; }
+  .idchip .ignoretag:hover { background:#fdeaea; }
   .links { display:flex; flex-direction:column; gap:8px; }
   .linkitem { display:flex; align-items:center; gap:10px; padding:8px 10px; border:1px solid var(--line);
               border-radius:8px; background:#fcfdff; }
@@ -723,11 +776,13 @@ _PAGE_HTML = """<!doctype html>
     <div class="toolbar">
       <button class="primary" onclick="createLink()">Create link from selection</button>
       <button onclick="autoLink()">Auto-link identical IDs</button>
+      <button class="danger" onclick="ignoreSelectedDendrites()">Ignore selected dendrite(s)</button>
       <button class="ghost" onclick="clearSelection()">Clear selection</button>
       <span style="flex:1"></span>
       <button onclick="saveLinks()">Save links</button>
       <button class="danger ghost" onclick="clearLinks()">Clear all links</button>
     </div>
+    <div class="hint">Ignoring a dendrite excludes every spine on it from any match candidacy at that timepoint, and lists them in the merged ignored_spines.csv. Dendrite ids are per-timepoint — select the same dendrite's checkbox in another timepoint's column too if it should be ignored there as well.</div>
     <div class="columns" id="columns"></div>
   </div>
   </details>
@@ -806,15 +861,21 @@ function renderColumns(){
   const c = document.getElementById('columns'); c.innerHTML='';
   STATE.timepoints.forEach(tp=>{
     const col = document.createElement('div'); col.className='col';
+    const ignoredHere = new Set((STATE.ignored_dendrites||{})[tp.name] || []);
     const ids = tp.dendrite_ids.map(id=>{
       const on = SEL[tp.name] && SEL[tp.name].has(id);
       const checked = on ? 'checked':'';
+      const isIgnored = ignoredHere.has(id);
       const selCls = on ? ' selected':'';
-      return `<label class="idchip${selCls}" data-tp="${tp.name.replace(/"/g,'&quot;')}" data-id="${id}"
+      const ignCls = isIgnored ? ' ignored' : '';
+      const tag = isIgnored
+        ? `<span class="ignoretag" title="Un-ignore this dendrite" onclick="event.stopPropagation(); unignoreDendrite('${tp.name.replace(/'/g,"\\\\'")}','${id}')">ignored ✕</span>`
+        : '';
+      return `<label class="idchip${selCls}${ignCls}" data-tp="${tp.name.replace(/"/g,'&quot;')}" data-id="${id}"
         onclick="rowPick(event,'${tp.name.replace(/'/g,"\\\\'")}','${id}')">
         <input type="checkbox" ${checked}/>
         <span class="swatch" style="background:${colorForId(id)}"></span>
-        <span>dendrite ${id}</span></label>`;
+        <span>dendrite ${id}</span>${tag}</label>`;
     }).join('');
     col.innerHTML = `
       <div class="chead"><div class="name">${tp.name}</div>
@@ -902,6 +963,27 @@ async function autoLink(){
   try{ STATE = await api('/mtp/auto-link-shared',{method:'POST'}); renderLinkHub();
     setStatus('Auto-linked identical IDs. '+STATE.links.length+' total.'); }
   catch(e){ setStatus('Auto-link failed: '+e.message); }
+}
+async function ignoreSelectedDendrites(){
+  const pairs = [];
+  Object.keys(SEL).forEach(tp=>{ SEL[tp].forEach(id=>pairs.push([tp,id])); });
+  if(!pairs.length){ setStatus('Select dendrite(s) to ignore first.'); return; }
+  try{
+    for(const [tp,id] of pairs){
+      STATE = await api('/mtp/ignore-dendrite', {method:'POST',headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({timepoint:tp, dendrite_id:id})});
+    }
+    Object.keys(SEL).forEach(k=>SEL[k].clear());
+    renderColumns();
+    setStatus('Ignored '+pairs.length+' dendrite(s). Their spines are excluded from matching.');
+  }catch(e){ setStatus('Ignore failed: '+e.message); }
+}
+async function unignoreDendrite(tp, id){
+  try{
+    STATE = await api('/mtp/ignore-dendrite/'+encodeURIComponent(tp)+'/'+encodeURIComponent(id), {method:'DELETE'});
+    renderColumns();
+    setStatus('Un-ignored dendrite '+id+' at '+tp+'.');
+  }catch(e){ setStatus('Un-ignore failed: '+e.message); }
 }
 async function deleteLink(id){
   try{ STATE = await api('/mtp/link/'+encodeURIComponent(id),{method:'DELETE'}); renderLinkHub(); }

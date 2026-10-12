@@ -93,12 +93,13 @@ ignored_spines.csv,fov,fixed,,Field of view number
 ignored_spines.csv,timepoint,fixed,,Timepoint this ignore applies to
 ignored_spines.csv,global_spine_id,fixed,,"Global spine ID (S_*) of the ignored detection; empty for source=lineage_fate (no detection exists at that timepoint)"
 ignored_spines.csv,local_spine_id,fixed,,"Local spine ID of the ignored detection; empty for source=lineage_fate"
-ignored_spines.csv,lineage_key,fixed,,"Which lineage's timepoint-gap this is; only populated for source=lineage_fate, empty for oof/qc_tag"
-ignored_spines.csv,source,fixed,"oof;qc_tag;lineage_fate",Which mechanism produced this ignore
+ignored_spines.csv,lineage_key,fixed,,"Which lineage's timepoint-gap this is; only populated for source=lineage_fate, empty for oof/qc_tag/dendrite"
+ignored_spines.csv,source,fixed,"oof;qc_tag;lineage_fate;dendrite",Which mechanism produced this ignore
 ignored_spines.csv,source (oof),enum value,oof,Spine falls inside a drawn out-of-frame region (ignored_spines.json)
 ignored_spines.csv,source (qc_tag),enum value,qc_tag,"Manually tagged ignore via Timepoint mode (I key) or bulk Tab->I (spine_qc_tags.json)"
 ignored_spines.csv,source (lineage_fate),enum value,lineage_fate,"A timepoint within a confirmed lineage was marked fate=ignore (lineage_decisions.json); no detection was chosen there by definition"
-_notes,ignored_spines.csv,,,"Results final/ only -- no per-FOV counterpart. Synthesized at merge time by unioning the three per-FOV ignore sources above across every FOV/timepoint; this is the one file to check for every spine ever ignored, by any mechanism."
+ignored_spines.csv,source (dendrite),enum value,dendrite,"Spine sits on a whole dendrite ignored via the Phase 0 dendrite-link step (ignored_dendrites.json); resolved live against the catalog, so a spine added to that dendrite later is covered too"
+_notes,ignored_spines.csv,,,"Results final/ only -- no per-FOV counterpart. Synthesized at merge time by unioning the four per-FOV ignore sources above across every FOV/timepoint; this is the one file to check for every spine ever ignored, by any mechanism."
 fov_inventory.csv,row_type,fixed,timepoint;workflow_pair,Which row shape this row uses (see below)
 fov_inventory.csv,animal_id,fixed,,Animal identifier
 fov_inventory.csv,fov,fixed,,Field of view number
@@ -147,6 +148,10 @@ ignored_spines.json,animal_id,metadata,,Animal identifier
 ignored_spines.json,fov,metadata,,Field of view
 ignored_spines.json,by_tp,metadata,,Timepoint -> list of global spine IDs (S_*) inside a drawn OOF region
 ignored_spines.json,updated_at,metadata,,Last update timestamp (UTC ISO)
+ignored_dendrites.json,animal_id,metadata,,Animal identifier
+ignored_dendrites.json,fov,metadata,,Field of view
+ignored_dendrites.json,by_tp,metadata,,"Timepoint -> list of ignored dendrite_id values (set via the Phase 0 dendrite-link step); resolved to spine ids live, not snapshotted"
+ignored_dendrites.json,updated_at,metadata,,Last update timestamp (UTC ISO)
 spine_qc_tags.json,animal_id,metadata,,Animal identifier
 spine_qc_tags.json,fov,metadata,,Field of view
 spine_qc_tags.json,by_tp,metadata,,Timepoint -> {global spine ID: artifact|ignore} -- manual per-spine QC tags

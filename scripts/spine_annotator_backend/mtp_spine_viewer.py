@@ -26,6 +26,7 @@ from . import (
     spine_lineage_store,
     manual_spine_store,
     ignored_spine_store,
+    ignored_dendrite_store,
     spine_catalog_store,
     spine_qc_store,
     spine_qc_tag_store,
@@ -68,6 +69,7 @@ class _ViewerState:
         self.active_link_id: str = ""
         self.oof_segments: List[dict] = []
         self.ignored_by_tp: Dict[str, set] = {}
+        self.ignored_dendrites_by_tp: Dict[str, set] = {}
         self.review_progress: dict = {}
         self.skip_orphan_phases: bool = False
         self.catalog: Optional[spine_catalog_store.SpineCatalog] = None
@@ -329,21 +331,30 @@ def _resolve_lineage_key_for_active() -> str:
 
 
 def _claimed_spine_ids_by_tp(exclude_lineage_key: str = "") -> Dict[str, set]:
-    """Global ids already claimed by OTHER saved lineages, per timepoint.
+    """Global ids unavailable as a fresh match candidate, per timepoint: already
+    claimed by another saved lineage, OR ignored (OOF region, manual QC tag, or
+    a whole ignored dendrite).
 
     Used to keep ranking/suggestion (build_lineage_positions*, build_pre_mid_queues)
-    from offering an already-claimed spine as a fresh candidate for a different
-    lineage - a claimed candidate is skipped entirely, falling through to the
-    next-best free one or a coordinate-estimate fallback."""
+    from ever offering one of these as a candidate for a different lineage - it
+    is skipped entirely, falling through to the next-best free candidate or a
+    coordinate-estimate fallback."""
     if not _STATE.respan_root:
         return {}
     respan = _respan_path()
-    return {
-        tp: spine_lineage_store.claimed_spine_ids_at_tp(
+    qc_tags = spine_qc_tag_store.load_tags(respan, _STATE.fov)
+    out: Dict[str, set] = {}
+    for tp in _STATE.timepoint_names:
+        claimed = spine_lineage_store.claimed_spine_ids_at_tp(
             respan, _STATE.fov, tp, exclude_lineage_key=exclude_lineage_key
         )
-        for tp in _STATE.timepoint_names
-    }
+        ignored = set(_STATE.ignored_by_tp.get(tp, set()))
+        tagged = spine_qc_tag_store.tagged_spines_at_tp(qc_tags, tp)
+        dendrite_ignored = ignored_dendrite_store.spine_ids_on_ignored_dendrites(
+            _STATE.ignored_dendrites_by_tp, tp, _STATE.spine_lookup.get(tp) or {}
+        )
+        out[tp] = claimed | ignored | tagged | dendrite_ignored
+    return out
 
 
 def _claimed_for_matching(tp: str) -> set[str]:
@@ -700,6 +711,7 @@ def _markers_for_panel_positions(
         if not (x0 <= x < x1 and y0 <= y < y1):
             continue
         is_focus = sid_str == focus_id
+        is_focus_conflict = is_focus and sid_str in assigned_ids
         markers.append(
             {
                 "spine_id": str(sid),
@@ -707,9 +719,13 @@ def _markers_for_panel_positions(
                 "y": float((y - y0) / h * height),
                 "z": float(rec.get("z", 0)),
                 "label": str(rec.get("label") or rec.get("local_spine_id") or sid),
-                "role": "focus"
-                if is_focus
-                else ("manual" if str(sid).startswith("manual_") else "csv"),
+                "role": (
+                    "focus_conflict"
+                    if is_focus_conflict
+                    else "focus"
+                    if is_focus
+                    else ("manual" if str(sid).startswith("manual_") else "csv")
+                ),
                 "assigned": sid_str in assigned_ids and not is_focus,
             }
         )
@@ -1215,7 +1231,16 @@ def _is_spine_ignored(tp: str, spine_id: str) -> bool:
         local = _STATE.catalog.to_local(tp, sid)
         if local and ignored_spine_store.is_ignored(_STATE.ignored_by_tp, tp, local):
             return True
-    return ignored_spine_store.is_ignored(_STATE.ignored_by_tp, tp, sid)
+    if ignored_spine_store.is_ignored(_STATE.ignored_by_tp, tp, sid):
+        return True
+    rec = (_STATE.spine_lookup.get(tp) or {}).get(sid) or {}
+    dendrite_id = str(rec.get("dendrite_id") or "")
+    return bool(
+        dendrite_id
+        and ignored_dendrite_store.is_dendrite_ignored(
+            _STATE.ignored_dendrites_by_tp, tp, dendrite_id
+        )
+    )
 
 
 def _sync_ignored_from_oof(respan: Path) -> None:
@@ -1986,6 +2011,7 @@ def load_from_animal(
         _build_queues()
         _STATE.oof_segments = oof_segment_store.load_segments(respan, fov)
         _STATE.ignored_by_tp = ignored_spine_store.load_ignored(respan, fov)
+        _STATE.ignored_dendrites_by_tp = ignored_dendrite_store.load_ignored_dendrites(respan, fov)
         _STATE.review_progress = spine_lineage_store.load_progress(respan, fov)
         _STATE.queue_phase_index = int(_STATE.review_progress.get("phase_index", 0) or 0)
         if _STATE.skip_orphan_phases:
@@ -2313,6 +2339,7 @@ def select_spine(req: SelectSpineRequest) -> SelectSpineResponse:
                 cross_links=_STATE.dendrite_links,
                 linked_dendrites_fn=_linked_dendrites,
                 oof_segments=_STATE.oof_segments,
+                exclude_spine_ids=_claimed_spine_ids_by_tp(exclude_lineage_key=gid),
             )
             _STATE.local_shifts = shifts
             positions = _apply_fate_rules(positions)
@@ -2382,6 +2409,7 @@ def select_spine(req: SelectSpineRequest) -> SelectSpineResponse:
             cross_links=_STATE.dendrite_links,
             linked_dendrites_fn=_linked_dendrites,
             oof_segments=_STATE.oof_segments,
+            exclude_spine_ids=_claimed_spine_ids_by_tp(exclude_lineage_key=spine_id),
         )
         _STATE.local_shifts = shifts
         if qitem and len(_STATE.timepoint_names) > 1:
@@ -2687,6 +2715,12 @@ def set_spine(req: SetSpineRequest) -> SelectSpineResponse:
         lookup = _STATE.spine_lookup.get(tp) or {}
         if sid not in lookup:
             raise ValueError(f"Spine '{sid}' not found at '{tp}'.")
+        if _is_spine_ignored(tp, sid):
+            raise ValueError(
+                f"Spine '{sid}' at '{tp}' is ignored (OOF region, QC tag, or an "
+                f"ignored dendrite) and cannot be matched. Un-ignore it first if "
+                f"this was a mistake."
+            )
         # A spine already claimed by another lineage is allowed here -- the
         # "one spine, one lineage" invariant is enforced at export, not at
         # click time (see find_duplicate_conflicts / apply_conflict_resolution).
@@ -2884,6 +2918,12 @@ def set_fate(req: SetFateRequest) -> SelectSpineResponse:
             pos["source"] = "cleared"
         pos_map[tp] = pos
         _set_active_positions(_apply_fate_rules(pos_map))
+        if fate and review_mode == REVIEW_MODE_TIMEPOINT and fate in ("artifact", "ignore"):
+            # The QC tag just written changes this spine's disposition (no
+            # longer unreviewed) - refresh the cached queues now so it isn't
+            # offered again as if nothing happened, without needing a reload.
+            _build_phase_queues(respan)
+            _rebuild_spine_id_list()
         return _select_spine_response(
             anchor_timepoint=active,
             message=f"{fate.upper()} at {tp}" if fate else "Cleared",
@@ -2935,6 +2975,8 @@ def set_fate_all_tps(req: SetFateAllRequest) -> SelectSpineResponse:
         if not applied:
             raise ValueError("No timepoint available for bulk ignore (all blocked by lineage LOST).")
         _set_active_positions(_apply_fate_rules(pos_map))
+        _build_phase_queues(respan)
+        _rebuild_spine_id_list()
         active = _current_anchor_timepoint()
         return _select_spine_response(
             review_mode=_STATE.review_mode,

@@ -579,8 +579,15 @@ def apply_local_registration(
     cross_links: List[dict],
     linked_dendrites_fn,
     oof_segments: Optional[List[dict]] = None,
+    exclude_spine_ids: Optional[Dict[str, Set[str]]] = None,
 ) -> Tuple[Dict[str, dict], Dict[str, Tuple[float, float, float]], bool]:
-    """Refine coord-only panels using pre→mid (and other matched) anchors."""
+    """Refine coord-only panels using pre→mid (and other matched) anchors.
+
+    exclude_spine_ids (global ids per timepoint: claimed by another lineage,
+    or ignored) are skipped by the nearest-detection search below, same as
+    every other ranking path - never silently snapped onto an unavailable
+    spine just because it happens to be geometrically closest.
+    """
     pre_id = str(pre_spine_id)
     if pre_tp not in spine_lookup or pre_id not in spine_lookup[pre_tp]:
         return positions, {}, False
@@ -633,9 +640,12 @@ def apply_local_registration(
             continue
         lookup = spine_lookup.get(tp) or {}
         linked = linked_dendrites_fn(pre_tp, bd, tp) if bd else set()
+        excluded_here = (exclude_spine_ids or {}).get(tp, set())
         near = None
         best_d = float("inf")
         for rec_id, rec in lookup.items():
+            if str(rec_id) in excluded_here:
+                continue
             did = str(rec.get("dendrite_id") or "")
             if linked and did not in linked:
                 continue

@@ -13,6 +13,7 @@ from . import (
     animal_config,
     animal_layout,
     dendrite_link_store,
+    ignored_dendrite_store,
     ignored_spine_store,
     spine_catalog_store,
     spine_lineage_store,
@@ -248,7 +249,7 @@ def _merge_wide_csv_by_timepoint(
 def _ignored_spine_rows_for_fov(respan: Path, fov: int, animal_id: str) -> List[dict]:
     """Union every 'ignore' source for one FOV into flat rows.
 
-    Three independent sources, each a genuinely different action:
+    Four independent sources, each a genuinely different action:
     - oof: spine falls inside a drawn out-of-frame region (ignored_spines.json)
     - qc_tag: manually tagged ignore via Timepoint mode / bulk Tab->I
       (spine_qc_tags.json)
@@ -257,6 +258,9 @@ def _ignored_spine_rows_for_fov(respan: Path, fov: int, animal_id: str) -> List[
       definition (the match must be cleared before fate can be set), so
       global_spine_id/local_spine_id are left empty and lineage_key
       identifies which lineage's timepoint-gap this is instead.
+    - dendrite: every spine currently on a dendrite ignored via the Phase 0
+      dendrite-link step (ignored_dendrites.json) - resolved live against the
+      catalog, so a spine added to that dendrite later is covered too.
     """
     catalog = spine_catalog_store.load_catalog(respan, fov)
 
@@ -279,6 +283,24 @@ def _ignored_spine_rows_for_fov(respan: Path, fov: int, animal_id: str) -> List[
                 "local_spine_id": _local_id(gid),
                 "lineage_key": "",
                 "source": "oof",
+            })
+
+    by_tp_dendrite = ignored_dendrite_store.load_ignored_dendrites(respan, fov)
+    for tp, dendrite_ids in sorted(by_tp_dendrite.items()):
+        if not dendrite_ids or not catalog:
+            continue
+        spine_ids = ignored_dendrite_store.spine_ids_on_ignored_dendrites(
+            by_tp_dendrite, tp, catalog.lookup_for_timepoint(tp)
+        )
+        for gid in sorted(spine_ids):
+            rows.append({
+                "animal_id": animal_id,
+                "fov": str(fov),
+                "timepoint": tp,
+                "global_spine_id": gid,
+                "local_spine_id": _local_id(gid),
+                "lineage_key": "",
+                "source": "dendrite",
             })
 
     qc_tags = spine_qc_tag_store.load_tags(respan, fov)

@@ -8,7 +8,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
-from . import dendrite_link_store, ignored_spine_store, spine_catalog_store, spine_lineage_store
+from . import (
+    dendrite_link_store,
+    ignored_dendrite_store,
+    ignored_spine_store,
+    spine_catalog_store,
+    spine_lineage_store,
+    spine_qc_tag_store,
+)
 
 DISPOSITION_FILENAME = "spine_disposition.csv"
 RESOLUTIONS_FILENAME = "duplicate_resolutions.json"
@@ -16,6 +23,9 @@ RESOLUTIONS_FILENAME = "duplicate_resolutions.json"
 DISPOSITION_UNREVIEWED = "unreviewed"
 DISPOSITION_DUPLICATE = "duplicate_unresolved"
 DISPOSITION_POOL_IGNORE = "pool_ignore"
+DISPOSITION_QC_IGNORE = "qc_ignore"
+DISPOSITION_QC_ARTIFACT = "qc_artifact"
+DISPOSITION_DENDRITE_IGNORE = "dendrite_ignore"
 DISPOSITION_LINEAGE_MATCHED = "lineage_matched"
 DISPOSITION_LINEAGE_NEW = "lineage_new"
 DISPOSITION_LINEAGE_LOST = "lineage_lost"
@@ -290,6 +300,8 @@ def build_disposition_rows(
     timepoint_names: List[str],
     catalog_rows: Optional[List[dict]] = None,
     ignored_by_tp: Optional[Dict[str, set]] = None,
+    qc_tags: Optional[Dict[str, Dict[str, str]]] = None,
+    ignored_dendrites_by_tp: Optional[Dict[str, set]] = None,
 ) -> Tuple[List[dict], dict]:
     if catalog_rows is None:
         cat_path = spine_catalog_store.catalog_path(respan, fov)
@@ -300,6 +312,15 @@ def build_disposition_rows(
             catalog_rows = []
     if ignored_by_tp is None:
         ignored_by_tp = ignored_spine_store.load_ignored(respan, fov)
+    if qc_tags is None:
+        qc_tags = spine_qc_tag_store.load_tags(respan, fov)
+    if ignored_dendrites_by_tp is None:
+        ignored_dendrites_by_tp = ignored_dendrite_store.load_ignored_dendrites(respan, fov)
+    dendrite_by_gid_tp: Dict[str, str] = {
+        str(cat.get("timepoint") or "") + "|" + str(cat.get("global_spine_id") or ""):
+            str(cat.get("dendrite_id") or "")
+        for cat in (catalog_rows or [])
+    }
 
     data = spine_lineage_store.load_decisions(respan, fov)
     lineages = list(data.get("lineages") or [])
@@ -336,6 +357,15 @@ def build_disposition_rows(
             duplicate_unresolved += 1
         elif gid in (ignored_by_tp.get(tp) or set()):
             disposition = DISPOSITION_POOL_IGNORE
+            reviewed = "yes"
+        elif str((qc_tags.get(tp) or {}).get(gid) or "") == "ignore":
+            disposition = DISPOSITION_QC_IGNORE
+            reviewed = "yes"
+        elif str((qc_tags.get(tp) or {}).get(gid) or "") == "artifact":
+            disposition = DISPOSITION_QC_ARTIFACT
+            reviewed = "yes"
+        elif str(dendrite_by_gid_tp.get(f"{tp}|{gid}") or "") in (ignored_dendrites_by_tp.get(tp) or set()):
+            disposition = DISPOSITION_DENDRITE_IGNORE
             reviewed = "yes"
         elif keys:
             primary = keys[0]
@@ -485,7 +515,17 @@ def _disposition_cache_valid(respan: Path, fov: int) -> bool:
     if not disp.is_file() or not meta["decisions"].is_file():
         return False
     try:
-        return disp.stat().st_mtime >= meta["decisions"].stat().st_mtime
+        disp_mtime = disp.stat().st_mtime
+        if disp_mtime < meta["decisions"].stat().st_mtime:
+            return False
+        for source_path in (
+            ignored_spine_store._path(respan, fov),
+            spine_qc_tag_store._path(respan, fov),
+            ignored_dendrite_store._path(respan, fov),
+        ):
+            if source_path.is_file() and disp_mtime < source_path.stat().st_mtime:
+                return False
+        return True
     except OSError:
         return False
 

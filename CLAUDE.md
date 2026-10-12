@@ -294,6 +294,7 @@ Each handles persistence of one type of decision/metadata:
 - **spine_qc_store.py** — QC metadata
 - **spine_qc_tag_store.py** — Manual QC ignore/flag tags (`spine_qc_tags.json`, Timepoint-mode)
 - **ignored_spine_store.py**, **oof_segment_store.py** — Out-of-frame & ignore flags
+- **ignored_dendrite_store.py** — Whole-dendrite ignore markers set in the Phase 0 dendrite-link step (`ignored_dendrites.json`); resolved live against the catalog
 - **animal_layout.py** — FOV/timepoint discovery, `fov_inventory.csv`
 - **results_final_store.py** — Merges per-FOV outputs (incl. combined `ignored_spines.csv`) into `Results final/`
 - **postprocess_registry.py** — CLI-only: derives `event_<tp>`/`lifecycle` columns; never auto-invoked by the server

@@ -622,6 +622,13 @@ function drawMarkers(ctx, markers, currentZ) {
       ctx.strokeStyle = '#22c55e'; ctx.lineWidth = 2;
       ctx.beginPath(); ctx.arc(x, y, 7, 0, Math.PI*2); ctx.stroke();
       ctx.fillStyle = '#22c55e'; ctx.fillText(m.label, x, y - 10);
+    } else if (m.role === 'focus_conflict') {
+      // Selected/confirmed position for this lineage, but also already
+      // claimed by another lineage -- yellow, not green, so it stands out
+      // from a genuinely uncontested selection.
+      ctx.strokeStyle = '#eab308'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(x, y, 7, 0, Math.PI*2); ctx.stroke();
+      ctx.fillStyle = '#eab308'; ctx.fillText(m.label, x, y - 10);
     } else if (m.role === 'conflict_a') {
       ctx.strokeStyle = '#2563eb'; ctx.lineWidth = 2.5;
       ctx.beginPath(); ctx.arc(x, y, 8, 0, Math.PI*2); ctx.stroke();
