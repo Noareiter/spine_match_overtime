@@ -631,6 +631,10 @@ def release_unbound_matches(
             if _tp_is_present(td):
                 end_i = j
             elif str(td.get("fate") or "").strip().lower() in ("lost", "ignore", "artifact"):
+                # A terminal fate IS the correct end of the tracked span - it
+                # must not be released/wiped by the loop below, only whatever
+                # comes after it (already-propagated lost/ignore, if any).
+                end_i = j
                 break
             elif _tp_is_unmarked_gap(td):
                 break
@@ -663,8 +667,15 @@ def _finalize_lineage_per_tp(
         per_tp, timepoint_names, pre_spine_id=pre_spine_id
     )
     without_bridge = strip_bridge_fates(without_fp, timepoint_names)
+    # NEW is exempted only at the session's true first timepoint - there is no
+    # earlier data to compare against there, by definition. A lineage whose own
+    # review happened to start later (e.g. reviewed via a later timepoint's
+    # orphan phase) must NOT get this exemption at its own start: if every
+    # earlier timepoint shows a real "no match, no fate" observation, that is
+    # a confirmed absence and NEW is still inferable there.
+    session_first_tp = timepoint_names[0] if timepoint_names else anchor_timepoint
     with_new = infer_new_at_first_match(
-        without_bridge, timepoint_names, anchor_timepoint=anchor_timepoint
+        without_bridge, timepoint_names, anchor_timepoint=session_first_tp
     )
     trimmed = release_unbound_matches(with_new, timepoint_names)
     finalized, _infer_last, disappeared_at_tp, censored_from_tp, right_censored = (
