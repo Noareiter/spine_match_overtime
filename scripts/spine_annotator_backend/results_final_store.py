@@ -58,6 +58,15 @@ _DENDRITE_LINKS_FIXED_COLUMNS = ("animal_id", "fov", "link_id")
 _DENDRITE_LINKS_TP_COLUMN_TEMPLATES = ("dendrite_id_{tp}",)
 
 IGNORED_MERGED_FILENAME = "ignored_spines.csv"
+ARTIFACT_MERGED_FILENAME = "artifact_spines.csv"
+ARTIFACT_COLUMNS = (
+    "animal_id",
+    "fov",
+    "timepoint",
+    "global_spine_id",
+    "local_spine_id",
+    "source",
+)
 IGNORED_COLUMNS = (
     "animal_id",
     "fov",
@@ -75,6 +84,7 @@ _COPY_JSON_NAMES = (
     "dendrite_links.json",
     "spine_review_progress.json",
     "timepoint_selection.json",
+    "spine_qc_tags.json",
 )
 
 
@@ -338,6 +348,56 @@ def _ignored_spine_rows_for_fov(respan: Path, fov: int, animal_id: str) -> List[
     return rows
 
 
+def _artifact_spine_rows_for_fov(respan: Path, fov: int, animal_id: str) -> List[dict]:
+    """Manually tagged artifacts (Timepoint mode A key, spine_qc_tags.json).
+
+    Each row is one detection at one timepoint judged a false positive. These
+    are independent of lineages, so they are not in spine_registry_wide.csv.
+    """
+    catalog = spine_catalog_store.load_catalog(respan, fov)
+
+    def _local_id(gid: str) -> str:
+        if not catalog:
+            return ""
+        row = catalog.by_global.get(str(gid))
+        return str(row.get("local_spine_id") or "") if row else ""
+
+    rows: List[dict] = []
+    for tp, tagmap in sorted(spine_qc_tag_store.load_tags(respan, fov).items()):
+        for gid, tag in sorted(tagmap.items()):
+            if tag != "artifact" or not str(gid).strip():
+                continue
+            rows.append({
+                "animal_id": animal_id,
+                "fov": str(fov),
+                "timepoint": tp,
+                "global_spine_id": gid,
+                "local_spine_id": _local_id(gid),
+                "source": "qc_tag",
+            })
+    return rows
+
+
+def _merge_artifact_spines(
+    target_fovs: List[int],
+    respan: Path,
+    animal_id: str,
+    out_path: Path,
+) -> int:
+    all_rows: List[dict] = []
+    for fov in target_fovs:
+        all_rows.extend(_artifact_spine_rows_for_fov(respan, fov, animal_id))
+    if not all_rows:
+        return 0
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=list(ARTIFACT_COLUMNS), extrasaction="ignore")
+        writer.writeheader()
+        for row in all_rows:
+            writer.writerow({k: row.get(k, "") for k in ARTIFACT_COLUMNS})
+    return len(all_rows)
+
+
 def _merge_ignored_spines(
     target_fovs: List[int],
     respan: Path,
@@ -419,6 +479,12 @@ def build_results_final(
     )
     if ignored_count:
         merged_counts[IGNORED_MERGED_FILENAME] = ignored_count
+
+    artifact_count = _merge_artifact_spines(
+        target_fovs, respan, cfg.animal_id, out_dir / ARTIFACT_MERGED_FILENAME
+    )
+    if artifact_count:
+        merged_counts[ARTIFACT_MERGED_FILENAME] = artifact_count
 
     for fov in target_fovs:
         meta = dendrite_link_store.annotator_meta_dir(respan, fov)

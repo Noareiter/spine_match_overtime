@@ -100,6 +100,13 @@ ignored_spines.csv,source (qc_tag),enum value,qc_tag,"Manually tagged ignore via
 ignored_spines.csv,source (lineage_fate),enum value,lineage_fate,"A timepoint within a confirmed lineage was marked fate=ignore (lineage_decisions.json); no detection was chosen there by definition"
 ignored_spines.csv,source (dendrite),enum value,dendrite,"Spine sits on a whole dendrite ignored via the Phase 0 dendrite-link step (ignored_dendrites.json); resolved live against the catalog, so a spine added to that dendrite later is covered too"
 _notes,ignored_spines.csv,,,"Results final/ only -- no per-FOV counterpart. Synthesized at merge time by unioning the four per-FOV ignore sources above across every FOV/timepoint; this is the one file to check for every spine ever ignored, by any mechanism."
+artifact_spines.csv,animal_id,fixed,,Animal identifier
+artifact_spines.csv,fov,fixed,,Field of view number
+artifact_spines.csv,timepoint,fixed,,Timepoint this artifact tag applies to
+artifact_spines.csv,global_spine_id,fixed,,Global spine ID (S_*) of the detection tagged as an artifact (false positive)
+artifact_spines.csv,local_spine_id,fixed,,Local spine ID of the tagged detection
+artifact_spines.csv,source,fixed,qc_tag,"Always qc_tag: manually tagged artifact via Timepoint mode (A key, saved with Shift+Enter; spine_qc_tags.json)"
+_notes,artifact_spines.csv,,,"Results final/ only. Unions artifact tags across every FOV; independent of lineages (a tagged spine is removed from any saved lineage). Only written when at least one artifact exists."
 fov_inventory.csv,row_type,fixed,timepoint;workflow_pair,Which row shape this row uses (see below)
 fov_inventory.csv,animal_id,fixed,,Animal identifier
 fov_inventory.csv,fov,fixed,,Field of view number
