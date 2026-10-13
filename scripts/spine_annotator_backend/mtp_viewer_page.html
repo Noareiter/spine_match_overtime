@@ -515,9 +515,14 @@ function showReviewComplete(res) {
       extra += ' Pending FOV(s): ' + res.pending_fovs.join(', ') + '.';
     }
     text.textContent = (res && res.message) || ('All spines reviewed.' + extra);
+    if (res && res.results_final_error) {
+      text.textContent += ' RESULTS FINAL NOT BUILT: ' + res.results_final_error +
+        ' (close any open file in Results final, e.g. in Excel, then press Save & next again).';
+    }
   }
   document.getElementById('status').textContent =
-    (res && res.message) || 'Review complete — registry saved.';
+    ((res && res.message) || 'Review complete — registry saved.') +
+    (res && res.results_final_error ? ' — RESULTS FINAL NOT BUILT: ' + res.results_final_error : '');
   updateNavButtons(true);
 }
 
