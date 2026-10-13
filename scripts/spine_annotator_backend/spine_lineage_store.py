@@ -969,6 +969,78 @@ def apply_undo_snapshot(
     }
 
 
+def delete_lineages_claiming(
+    respan: Path,
+    fov: int,
+    timepoint: str,
+    spine_ids: set,
+) -> List[dict]:
+    """Delete every saved lineage that actively claims one of spine_ids at
+    timepoint (a matched spine_id there, or its anchor spine when timepoint is
+    the lineage's own pre_timepoint). The lineage's other timepoints are NOT
+    kept: they return to the unmatched pool. Reviewed marks for the deleted
+    lineages are dropped too, so their anchors re-enter the queue.
+
+    Returns the deleted lineage entries (for undo); empty if none matched.
+    """
+    wanted = {str(x).strip() for x in spine_ids if str(x).strip()}
+    if not wanted:
+        return []
+    data = load_decisions(respan, fov)
+    kept: List[dict] = []
+    removed: List[dict] = []
+    for lin in data.get("lineages") or []:
+        if _lineage_claim_ids_at_tp(lin, timepoint) & wanted:
+            removed.append(lin)
+        else:
+            kept.append(lin)
+    if not removed:
+        return []
+    _write_lineages_and_rebuild(respan, fov, data, kept)
+    gone_keys = {
+        str(lin.get("lineage_key") or lin.get("pre_spine_id") or "").strip()
+        for lin in removed
+    }
+    prog = load_progress(respan, fov)
+    ids = [x for x in (prog.get("reviewed_ids") or []) if str(x) not in gone_keys]
+    save_progress(
+        respan,
+        fov,
+        index=int(prog.get("last_pre_spine_index", 0) or 0),
+        reviewed_ids=ids,
+        phase_index=int(prog.get("phase_index", 0) or 0),
+        anchor_timepoint=str(prog.get("anchor_timepoint") or ""),
+    )
+    return removed
+
+
+def restore_lineages(respan: Path, fov: int, entries: List[dict]) -> None:
+    """Put back lineage entries previously returned by delete_lineages_claiming."""
+    if not entries:
+        return
+    data = load_decisions(respan, fov)
+    restore_keys = {
+        str(e.get("lineage_key") or e.get("pre_spine_id") or "").strip() for e in entries
+    }
+    kept = [
+        lin
+        for lin in (data.get("lineages") or [])
+        if str(lin.get("lineage_key") or lin.get("pre_spine_id") or "").strip()
+        not in restore_keys
+    ]
+    kept.extend(entries)
+    _write_lineages_and_rebuild(respan, fov, data, kept)
+
+
+def _write_lineages_and_rebuild(respan: Path, fov: int, data: dict, lineages: List[dict]) -> None:
+    meta = paths(respan, fov)
+    data["lineages"] = lineages
+    data["updated_at"] = datetime.now(timezone.utc).isoformat()
+    meta["dir"].mkdir(parents=True, exist_ok=True)
+    meta["decisions"].write_text(json.dumps(data, indent=2), encoding="utf-8")
+    rebuild_registry_wide(respan, fov, animal_id=str(data.get("animal_id") or ""))
+
+
 def _status_for_tp(tp_data: dict) -> str:
     if is_single_tp_focus_ignore(tp_data):
         return "single_tp_only"

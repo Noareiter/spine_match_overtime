@@ -174,6 +174,7 @@
 </div>
 <script>
 const S = {
+  stagedFate: null,
   timepoints: [], t1SpineIds: [], queueMeta: {}, idx: 0, positions: {},
   fovCenter: {}, zoomCenter: {}, fovZ: {}, fovZMax: {}, fovSpan: {}, zoomSizeA: {}, zoomSizeB: {},
   drag: null, oofDrag: null, oofStroke: null, oofPreview: null, oofEdit: null, oofPropagateShift: false, queueMode: 'main', crossCount: 0,
@@ -268,9 +269,12 @@ function updatePhaseBadge() {
     ? `Phase ${S.phaseIndex + 1}/${S.phaseCount}: ${S.anchorTp || S.timepoints[0] || ''}`
     : '';
   if (S.reviewMode === 'timepoint') {
+    const staged = S.stagedFate
+      ? ` · ${S.stagedFate.fate.toUpperCase()} STAGED — Shift+Enter saves, Tab cancels`
+      : '';
     el.textContent = phase
-      ? `${phase} · TIMEPOINT (A/I)`
-      : 'TIMEPOINT mode (A/I)';
+      ? `${phase} · TIMEPOINT (A/I)${staged}`
+      : `TIMEPOINT mode (A/I)${staged}`;
   } else if (S.phaseKind === 'duplicate') {
     const cov = S.coverage || {};
     const covTxt = cov.catalog_total ? ` · ${cov.tagged || 0}/${cov.catalog_total} tagged` : '';
@@ -1890,7 +1894,7 @@ function renderOneFateBar(tp, row, posMap, barId, isFocusRow) {
   const show = isActive && !p.spine_id && !p.fate_locked;
   const lockNote = p.fate_locked ? ' title="Blocked — lineage LOST at previous timepoint"' : '';
   const shortcutHint = isActive
-    ? '<span style="color:#5b21b6;font-size:10px">A artifact · I single-TP</span>'
+    ? '<span style="color:#5b21b6;font-size:10px">A artifact · I single-TP · Shift+Enter saves</span>'
     : '';
   bar.innerHTML = `${rowTag}${sid} ${fate} ${localNote}
       <select id="fsel_${row}_${esc(tp)}" onchange="setConflictFocus(${rowArg});onFateChange('${tp}',${rowArg})" ${show && !p.fate_locked ? '' : 'style="display:none"'}${lockNote}>${opts}</select>
@@ -2023,6 +2027,52 @@ async function ignoreAllTpsLineage() {
   }
 }
 
+function stageFate(tp, fate) {
+  const sid = S.positions && S.positions[tp] && S.positions[tp].spine_id;
+  if (!sid) {
+    document.getElementById('status').textContent = `No spine at ${tp} to mark ${fate.toUpperCase()}.`;
+    return;
+  }
+  S.stagedFate = { tp, fate, spineId: String(sid) };
+  updatePhaseBadge();
+  document.getElementById('status').textContent =
+    `${fate.toUpperCase()} staged for spine ${sid} at ${tp} only — Shift+Enter to save, Tab to cancel. Nothing is written until you save.`;
+}
+
+function cancelStagedFate() {
+  if (!S.stagedFate) return false;
+  S.stagedFate = null;
+  updatePhaseBadge();
+  document.getElementById('status').textContent = 'Staged fate cancelled.';
+  return true;
+}
+
+async function commitStagedFate() {
+  if (S.reviewComplete) return;
+  const st = S.stagedFate;
+  if (!st) {
+    document.getElementById('status').textContent = 'Nothing staged. Press A (artifact) or I (ignore) first.';
+    return;
+  }
+  if (S.fateBusy) return;
+  S.fateBusy = true;
+  let res;
+  try {
+    res = await api('/mtp/viewer/commit-timepoint-fate', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ timepoint: st.tp, fate: st.fate })
+    });
+  } catch(err) {
+    document.getElementById('status').textContent = String(err.message || err);
+    S.fateBusy = false;
+    return;
+  }
+  S.fateBusy = false;
+  S.stagedFate = null;
+  clearUndo();
+  await afterSaveResponse(res);
+}
+
 async function setLocalFate(tp, fate, row) {
   if (S.reviewMode !== 'timepoint') {
     document.getElementById('status').textContent = 'Switch to timepoint mode first (S or the mode button).';
@@ -2030,7 +2080,13 @@ async function setLocalFate(tp, fate, row) {
   }
   const bodyBase = { timepoint: tp, review_mode: S.reviewMode };
   if (row) bodyBase.lineage_row = String(row).toLowerCase();
+  if (fate) {
+    stageFate(tp, fate);
+    return;
+  }
   if (!fate) {
+    S.stagedFate = null;
+    updatePhaseBadge();
     pushUndo();
     try {
       const res = await api('/mtp/viewer/set-fate', {
@@ -2087,6 +2143,7 @@ function reviewModeStatusText() {
 }
 
 function toggleReviewMode() {
+  S.stagedFate = null;
   S.reviewMode = S.reviewMode === 'timepoint' ? 'lineage' : 'timepoint';
   updatePhaseBadge();
   updateFateBars();
@@ -2165,6 +2222,14 @@ function onViewerKeydown(e) {
     return;
   }
   if (e.ctrlKey || e.altKey || e.metaKey) return;
+  if (e.code === 'Enter' && e.shiftKey) {
+    if (textInputFocused() || S.reviewComplete) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (S.reviewMode === 'timepoint') commitStagedFate();
+    else nextSpine(); // Lineage mode: same as Ctrl+Enter / Save & next.
+    return;
+  }
   if (e.code === 'KeyS') {
     if (textInputFocused()) return;
     e.preventDefault();
@@ -2175,6 +2240,7 @@ function onViewerKeydown(e) {
   if (e.code === 'Tab' && !e.shiftKey) {
     if (textInputFocused()) return;
     e.preventDefault();
+    if (cancelStagedFate()) return;
     if (S.reviewMode === 'timepoint') {
       const tp = S.anchorTp || S.timepoints[0];
       if (tp) clearTp(tp);
@@ -2206,8 +2272,8 @@ function onViewerKeydown(e) {
     if (textInputFocused() || S.reviewComplete || !S.t1SpineIds.length) return;
     e.preventDefault();
     e.stopPropagation();
-    const delta = e.code === 'ArrowLeft' ? -1 : 1;
-    selectSpineAt(S.idx + delta);
+    if (e.code === 'ArrowLeft') prevSpine(); // same code path as the Prev button
+    else selectSpineAt(S.idx + 1);
     return;
   }
   if (e.code === 'Enter') {
@@ -2397,6 +2463,7 @@ async function selectSpineAt(idx) {
     const banner = document.getElementById('completeBanner');
     if (banner) banner.classList.remove('open');
   }
+  S.stagedFate = null;
   ensureLineageMode();
   clearUndo();
   setAddSpineMode(false);
@@ -2488,6 +2555,7 @@ async function applyQueueUpdate(res) {
 }
 
 async function prevSpine() {
+  if (!S.t1SpineIds.length) return;
   if (S.idx > 0) await selectSpineAt(S.idx - 1);
 }
 
@@ -2502,6 +2570,7 @@ async function nextSpine() {
     const banner = document.getElementById('completeBanner');
     if (banner) banner.classList.remove('open');
   }
+  S.stagedFate = null;
   ensureLineageMode();
   clearUndo();
   let res;
@@ -2514,6 +2583,10 @@ async function nextSpine() {
       : msg;
     return;
   }
+  await afterSaveResponse(res);
+}
+
+async function afterSaveResponse(res) {
   if (res.registry_path) updateOutputPath(res.registry_path, res.registry_mtime);
   document.getElementById('status').textContent = formatSaveStatus(res);
   ensureLineageMode();

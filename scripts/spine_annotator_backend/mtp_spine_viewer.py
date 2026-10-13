@@ -1945,6 +1945,11 @@ class RestorePositionsRequest(BaseModel):
     positions: Dict[str, dict] = Field(default_factory=dict)
 
 
+class CommitTimepointFateRequest(BaseModel):
+    timepoint: str
+    fate: str
+
+
 class UndoLastDecisionResponse(BaseModel):
     ok: bool
     message: str
@@ -3064,6 +3069,124 @@ def undo_positions(req: RestorePositionsRequest) -> SelectSpineResponse:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+def _complete_review_save(
+    respan: Path,
+    anchor_tp: str,
+    anchor_global: str,
+    save_info: dict,
+    *,
+    message: str = "",
+) -> dict:
+    """Shared tail of every "this spine is now reviewed" save: mark it reviewed,
+    rebuild the queues, advance the phase if finished, and build the response
+    the page uses to move on. message overrides the default "Saved ..." text."""
+    _STATE.coverage_summary = dict(save_info.get("coverage") or {})
+    was_last_in_phase = False
+    if _STATE.active_t1_spine_id in _STATE.t1_spine_ids:
+        was_last_in_phase = (
+            _STATE.t1_spine_ids.index(_STATE.active_t1_spine_id)
+            >= len(_STATE.t1_spine_ids) - 1
+        )
+    idx = (
+        _STATE.t1_spine_ids.index(_STATE.active_t1_spine_id)
+        if _STATE.active_t1_spine_id in _STATE.t1_spine_ids
+        else 0
+    )
+    prog = spine_lineage_store.mark_reviewed(
+        respan,
+        _STATE.fov,
+        _STATE.active_t1_spine_id,
+        idx,
+        phase_index=_STATE.queue_phase_index,
+        anchor_timepoint=anchor_tp,
+    )
+    _STATE.review_progress = prog
+    _build_phase_queues(respan)
+    _rebuild_spine_id_list()
+    phase_adv = _advance_phase_if_complete(respan, force_advance=was_last_in_phase)
+    out = {
+        "saved": True,
+        "pre_spine_id": _STATE.active_t1_spine_id,
+        "anchor_timepoint": anchor_tp,
+        "phase_index": _STATE.queue_phase_index,
+        "review_progress": _STATE.review_progress,
+        "queue_count": len(_STATE.t1_spine_ids),
+        "spine_ids": list(_STATE.t1_spine_ids),
+        "phase_advanced": bool(phase_adv),
+        "last_seen_tp": save_info.get("last_seen_tp", ""),
+        "lost_inferred": bool(save_info.get("lost_inferred")),
+        "censored_from_tp": save_info.get("censored_from_tp", ""),
+        "right_censored": bool(save_info.get("right_censored")),
+    }
+    if save_info.get("right_censored"):
+        out["inference_message"] = (
+            f"Right-censored from {save_info.get('censored_from_tp') or 'final TP'} "
+            f"(last seen at {save_info.get('last_seen_tp') or '?'} — not classified as lost)."
+        )
+    elif save_info.get("censored_from_tp"):
+        out["inference_message"] = (
+            f"Censored from {save_info['censored_from_tp']} "
+            f"(last seen at {save_info.get('last_seen_tp') or '?'} — loss not inferred)."
+        )
+    elif save_info.get("lost_inferred"):
+        out["inference_message"] = (
+            f"Lost after {save_info.get('last_seen_tp') or '?'} "
+            f"(not seen in later timepoints)."
+        )
+    if phase_adv:
+        out.update(phase_adv)
+    out["review_mode"] = REVIEW_MODE_LINEAGE
+    tps = _STATE.timepoint_names
+    is_last_phase = _STATE.queue_phase_index >= _review_phase_count() - 1
+    is_last_spine = (
+        _STATE.active_t1_spine_id in _STATE.t1_spine_ids
+        and _STATE.t1_spine_ids.index(_STATE.active_t1_spine_id)
+        >= len(_STATE.t1_spine_ids) - 1
+    )
+    out["review_complete"] = bool(
+        is_last_phase
+        and is_last_spine
+        and not phase_adv
+        and int((_STATE.coverage_summary or {}).get("unreviewed", 1)) == 0
+        and int((_STATE.coverage_summary or {}).get("duplicate_unresolved", 1)) == 0
+    )
+    out["review_mode"] = REVIEW_MODE_LINEAGE
+    out["phase_kind"] = _current_phase_kind()
+    out["coverage"] = dict(_STATE.coverage_summary or {})
+    reg_path = str(save_info.get("registry_path") or "")
+    if not reg_path:
+        reg_path = str(respan / "_annotator" / f"fov{_STATE.fov}" / "spine_registry_wide.csv")
+    out["registry_path"] = reg_path
+    out["registry_mtime"] = _registry_mtime_iso(Path(reg_path))
+    out["decisions_path"] = str(save_info.get("path") or "")
+    out["disposition_path"] = str(save_info.get("disposition_path") or "")
+    out["coverage"] = dict(_STATE.coverage_summary or {})
+    out["message"] = message or (
+        f"Saved {anchor_global} — registry updated ({len(_STATE.review_progress.get('reviewed_ids', []) or [])} spine(s))."
+    )
+    if out["review_complete"]:
+        cov = _STATE.coverage_summary or {}
+        _attach_results_final(respan, out)
+        if out.get("all_fovs_complete") and out.get("results_final_dir"):
+            out["message"] = (
+                f"Review complete for FOV {_STATE.fov}. "
+                f"All FOVs done — Results final: {out['results_final_dir']}"
+            )
+        elif out.get("pending_fovs"):
+            pending = ", ".join(str(x) for x in out["pending_fovs"])
+            out["message"] = (
+                f"Review complete for FOV {_STATE.fov} "
+                f"({cov.get('tagged', '?')}/{cov.get('catalog_total', '?')} tagged). "
+                f"Still pending: FOV {pending}."
+            )
+        else:
+            out["message"] = (
+                f"Review complete — {cov.get('tagged', '?')}/{cov.get('catalog_total', '?')} spines tagged · "
+                f"0 duplicates · 0 unreviewed."
+            )
+    return out
+
+
 @router.post("/confirm-lineage")
 def confirm_lineage() -> dict:
     try:
@@ -3112,111 +3235,139 @@ def confirm_lineage() -> dict:
             ignored_by_tp=_STATE.ignored_by_tp,
             shifts=_STATE.local_shifts,
         )
-        _STATE.coverage_summary = dict(save_info.get("coverage") or {})
-        was_last_in_phase = False
-        if _STATE.active_t1_spine_id in _STATE.t1_spine_ids:
-            was_last_in_phase = (
-                _STATE.t1_spine_ids.index(_STATE.active_t1_spine_id)
-                >= len(_STATE.t1_spine_ids) - 1
-            )
-        idx = (
-            _STATE.t1_spine_ids.index(_STATE.active_t1_spine_id)
-            if _STATE.active_t1_spine_id in _STATE.t1_spine_ids
-            else 0
+        return _complete_review_save(respan, anchor_tp, anchor_global, save_info)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _undo_timepoint_fate(respan: Path, stash: dict) -> dict:
+    """Reverse commit_timepoint_fate: restore the prior tag (or clear it),
+    bring back any deleted lineages, and roll reviewed progress back."""
+    tp = str(stash["timepoint"])
+    spine_id = str(stash["spine_id"])
+    prior_tag = str(stash.get("prior_tag") or "")
+    if prior_tag:
+        spine_qc_tag_store.save_tag(
+            respan, _STATE.fov, timepoint=tp, spine_id=spine_id,
+            tag=prior_tag, animal_id=_STATE.animal_id,
         )
-        prog = spine_lineage_store.mark_reviewed(
+    else:
+        spine_qc_tag_store.clear_tag(
+            respan, _STATE.fov, timepoint=tp, spine_id=spine_id,
+            animal_id=_STATE.animal_id,
+        )
+    spine_lineage_store.restore_lineages(
+        respan, _STATE.fov, list(stash.get("removed_lineages") or [])
+    )
+    prog = spine_lineage_store.load_progress(respan, _STATE.fov)
+    phase_index = int(stash.get("phase_index", 0) or 0)
+    anchor_timepoint = str(stash.get("anchor_timepoint") or "")
+    spine_lineage_store.save_progress(
+        respan,
+        _STATE.fov,
+        index=int(prog.get("last_pre_spine_index", 0) or 0),
+        reviewed_ids=list(stash.get("reviewed_ids") or []),
+        phase_index=phase_index,
+        anchor_timepoint=anchor_timepoint,
+    )
+    _, coverage = spine_qc_store.rebuild_spine_disposition(
+        respan,
+        _STATE.fov,
+        animal_id=_STATE.animal_id,
+        timepoint_names=_STATE.timepoint_names,
+        ignored_by_tp=_STATE.ignored_by_tp,
+    )
+    registry = spine_lineage_store.paths(respan, _STATE.fov)["registry"]
+    return {
+        "ok": True,
+        "spine_id": str(stash.get("reviewed_id") or ""),
+        "phase_index": phase_index,
+        "anchor_timepoint": anchor_timepoint,
+        "registry_path": str(registry),
+        "coverage": coverage,
+        "message": f"Undid {tp} tag on {spine_id}"
+        + (" and restored its lineage." if stash.get("removed_lineages") else "."),
+    }
+
+
+@router.post("/commit-timepoint-fate")
+def commit_timepoint_fate(req: CommitTimepointFateRequest) -> dict:
+    """Timepoint mode: save a staged artifact/ignore for ONE spine at ONE timepoint.
+
+    Writes only that spine's QC tag. Any saved lineage that claims the spine at
+    this timepoint is deleted outright - its other timepoints are not carried
+    over and return to the unmatched pool, available in later rounds. The open
+    panel is never saved as a lineage.
+    """
+    try:
+        if not _STATE.active_t1_spine_id:
+            raise ValueError("No active spine.")
+        if _is_duplicate_phase():
+            raise ValueError("Not available in the duplicate conflict phase.")
+        tp = str(req.timepoint or "").strip()
+        fate = str(req.fate or "").strip().lower()
+        if fate not in ("artifact", "ignore"):
+            raise ValueError(f"Invalid fate '{fate}'.")
+        anchor_tp = _current_anchor_timepoint()
+        if tp != anchor_tp:
+            raise ValueError(f"Timepoint mode applies to the current anchor '{anchor_tp}' only.")
+        spine_id = str((_STATE.positions.get(tp) or {}).get("spine_id") or "").strip()
+        if not spine_id:
+            raise ValueError(f"No spine at '{tp}' to tag as {fate}.")
+        respan = _respan_path()
+        anchor_global = (
+            spine_qc_store.parse_queue_id(_STATE.active_t1_spine_id)[1]
+            if _is_unreviewed_phase()
+            else str(_STATE.active_t1_spine_id)
+        ) or spine_id
+
+        prior_progress = spine_lineage_store.load_progress(respan, _STATE.fov)
+        prior_tags = spine_qc_tag_store.load_tags(respan, _STATE.fov)
+        prior_tag = str((prior_tags.get(tp) or {}).get(spine_id) or "")
+        removed = spine_lineage_store.delete_lineages_claiming(
+            respan, _STATE.fov, tp, {spine_id}
+        )
+        spine_qc_tag_store.save_tag(
+            respan, _STATE.fov,
+            timepoint=tp,
+            spine_id=spine_id,
+            tag=fate,
+            animal_id=_STATE.animal_id,
+        )
+        _STATE.undo_stash = {
+            "kind": "timepoint_fate",
+            "timepoint": tp,
+            "spine_id": spine_id,
+            "prior_tag": prior_tag,
+            "removed_lineages": copy.deepcopy(removed),
+            "reviewed_id": str(_STATE.active_t1_spine_id),
+            "reviewed_ids": list(prior_progress.get("reviewed_ids") or []),
+            "phase_index": int(prior_progress.get("phase_index", 0) or 0),
+            "anchor_timepoint": str(prior_progress.get("anchor_timepoint") or ""),
+        }
+        _STATE.review_mode = REVIEW_MODE_LINEAGE
+        disp, coverage = spine_qc_store.rebuild_spine_disposition(
             respan,
             _STATE.fov,
-            _STATE.active_t1_spine_id,
-            idx,
-            phase_index=_STATE.queue_phase_index,
-            anchor_timepoint=anchor_tp,
+            animal_id=_STATE.animal_id,
+            timepoint_names=_STATE.timepoint_names,
+            ignored_by_tp=_STATE.ignored_by_tp,
         )
-        _STATE.review_progress = prog
-        _build_phase_queues(respan)
-        _rebuild_spine_id_list()
-        phase_adv = _advance_phase_if_complete(respan, force_advance=was_last_in_phase)
-        out = {
-            "saved": True,
-            "pre_spine_id": _STATE.active_t1_spine_id,
-            "anchor_timepoint": anchor_tp,
-            "phase_index": _STATE.queue_phase_index,
-            "review_progress": _STATE.review_progress,
-            "queue_count": len(_STATE.t1_spine_ids),
-            "spine_ids": list(_STATE.t1_spine_ids),
-            "phase_advanced": bool(phase_adv),
-            "last_seen_tp": save_info.get("last_seen_tp", ""),
-            "lost_inferred": bool(save_info.get("lost_inferred")),
-            "censored_from_tp": save_info.get("censored_from_tp", ""),
-            "right_censored": bool(save_info.get("right_censored")),
+        meta = spine_lineage_store.paths(respan, _STATE.fov)
+        save_info = {
+            "coverage": coverage,
+            "registry_path": str(meta["registry"]),
+            "path": str(meta["decisions"]),
+            "disposition_path": str(disp),
         }
-        if save_info.get("right_censored"):
-            out["inference_message"] = (
-                f"Right-censored from {save_info.get('censored_from_tp') or 'final TP'} "
-                f"(last seen at {save_info.get('last_seen_tp') or '?'} — not classified as lost)."
-            )
-        elif save_info.get("censored_from_tp"):
-            out["inference_message"] = (
-                f"Censored from {save_info['censored_from_tp']} "
-                f"(last seen at {save_info.get('last_seen_tp') or '?'} — loss not inferred)."
-            )
-        elif save_info.get("lost_inferred"):
-            out["inference_message"] = (
-                f"Lost after {save_info.get('last_seen_tp') or '?'} "
-                f"(not seen in later timepoints)."
-            )
-        if phase_adv:
-            out.update(phase_adv)
-        out["review_mode"] = REVIEW_MODE_LINEAGE
-        tps = _STATE.timepoint_names
-        is_last_phase = _STATE.queue_phase_index >= _review_phase_count() - 1
-        is_last_spine = (
-            _STATE.active_t1_spine_id in _STATE.t1_spine_ids
-            and _STATE.t1_spine_ids.index(_STATE.active_t1_spine_id)
-            >= len(_STATE.t1_spine_ids) - 1
+        freed = f" · lineage deleted ({len(removed)}), other timepoints freed" if removed else ""
+        return _complete_review_save(
+            respan,
+            anchor_tp,
+            anchor_global,
+            save_info,
+            message=f"{fate.upper()} saved for {spine_id} at {tp} only{freed}.",
         )
-        out["review_complete"] = bool(
-            is_last_phase
-            and is_last_spine
-            and not phase_adv
-            and int((_STATE.coverage_summary or {}).get("unreviewed", 1)) == 0
-            and int((_STATE.coverage_summary or {}).get("duplicate_unresolved", 1)) == 0
-        )
-        out["review_mode"] = REVIEW_MODE_LINEAGE
-        out["phase_kind"] = _current_phase_kind()
-        out["coverage"] = dict(_STATE.coverage_summary or {})
-        reg_path = str(save_info.get("registry_path") or "")
-        if not reg_path:
-            reg_path = str(respan / "_annotator" / f"fov{_STATE.fov}" / "spine_registry_wide.csv")
-        out["registry_path"] = reg_path
-        out["registry_mtime"] = _registry_mtime_iso(Path(reg_path))
-        out["decisions_path"] = str(save_info.get("path") or "")
-        out["disposition_path"] = str(save_info.get("disposition_path") or "")
-        out["coverage"] = dict(_STATE.coverage_summary or {})
-        out["message"] = (
-            f"Saved {anchor_global} — registry updated ({len(_STATE.review_progress.get('reviewed_ids', []) or [])} spine(s))."
-        )
-        if out["review_complete"]:
-            cov = _STATE.coverage_summary or {}
-            _attach_results_final(respan, out)
-            if out.get("all_fovs_complete") and out.get("results_final_dir"):
-                out["message"] = (
-                    f"Review complete for FOV {_STATE.fov}. "
-                    f"All FOVs done — Results final: {out['results_final_dir']}"
-                )
-            elif out.get("pending_fovs"):
-                pending = ", ".join(str(x) for x in out["pending_fovs"])
-                out["message"] = (
-                    f"Review complete for FOV {_STATE.fov} "
-                    f"({cov.get('tagged', '?')}/{cov.get('catalog_total', '?')} tagged). "
-                    f"Still pending: FOV {pending}."
-                )
-            else:
-                out["message"] = (
-                    f"Review complete — {cov.get('tagged', '?')}/{cov.get('catalog_total', '?')} spines tagged · "
-                    f"0 duplicates · 0 unreviewed."
-                )
-        return out
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -3234,13 +3385,16 @@ def undo_last_decision() -> UndoLastDecisionResponse:
             return UndoLastDecisionResponse(ok=False, message="Nothing to undo.")
         _STATE.undo_stash = None
         respan = _respan_path()
-        result = spine_lineage_store.apply_undo_snapshot(
-            respan,
-            _STATE.fov,
-            stash,
-            timepoint_names=_STATE.timepoint_names,
-            ignored_by_tp=_STATE.ignored_by_tp,
-        )
+        if stash.get("kind") == "timepoint_fate":
+            result = _undo_timepoint_fate(respan, stash)
+        else:
+            result = spine_lineage_store.apply_undo_snapshot(
+                respan,
+                _STATE.fov,
+                stash,
+                timepoint_names=_STATE.timepoint_names,
+                ignored_by_tp=_STATE.ignored_by_tp,
+            )
         if not result.get("ok"):
             return UndoLastDecisionResponse(ok=False, message=result.get("message") or "Nothing to undo.")
 
