@@ -270,7 +270,7 @@ function updatePhaseBadge() {
     : '';
   if (S.reviewMode === 'timepoint') {
     const staged = S.stagedFate
-      ? ` · ${S.stagedFate.fate.toUpperCase()} STAGED — Shift+Enter saves, Tab cancels`
+      ? ` · ${S.stagedFate.fate.toUpperCase()} STAGED — Save & next (Shift+Enter) saves, Tab cancels`
       : '';
     el.textContent = phase
       ? `${phase} · TIMEPOINT (A/I)${staged}`
@@ -2036,7 +2036,7 @@ function stageFate(tp, fate) {
   S.stagedFate = { tp, fate, spineId: String(sid) };
   updatePhaseBadge();
   document.getElementById('status').textContent =
-    `${fate.toUpperCase()} staged for spine ${sid} at ${tp} only — Shift+Enter to save, Tab to cancel. Nothing is written until you save.`;
+    `${fate.toUpperCase()} staged for spine ${sid} at ${tp} only — Save & next (Shift+Enter) to save, Tab to cancel. Nothing is written until you save.`;
 }
 
 function cancelStagedFate() {
@@ -2226,8 +2226,7 @@ function onViewerKeydown(e) {
     if (textInputFocused() || S.reviewComplete) return;
     e.preventDefault();
     e.stopPropagation();
-    if (S.reviewMode === 'timepoint') commitStagedFate();
-    else nextSpine(); // Lineage mode: same as Ctrl+Enter / Save & next.
+    nextSpine(); // Same as the Save & next button.
     return;
   }
   if (e.code === 'KeyS') {
@@ -2570,7 +2569,11 @@ async function nextSpine() {
     const banner = document.getElementById('completeBanner');
     if (banner) banner.classList.remove('open');
   }
-  S.stagedFate = null;
+  if (S.stagedFate) {
+    // A staged A/I is what "save" means here: tag that one spine, then advance.
+    await commitStagedFate();
+    return;
+  }
   ensureLineageMode();
   clearUndo();
   let res;
