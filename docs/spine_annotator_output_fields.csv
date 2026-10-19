@@ -13,11 +13,11 @@ spine_registry_wide.csv,status_<timepoint>,per_timepoint,"matched;manual;new;los
 spine_registry_wide.csv,status (matched),enum value,matched,Spine match exists
 spine_registry_wide.csv,status (manual),enum value,manual,Manually added spine
 spine_registry_wide.csv,status (new),enum value,new,New spine first seen here
-spine_registry_wide.csv,status (lost),enum value,lost,Lost after prior presence
+spine_registry_wide.csv,status (lost),enum value,lost,First timepoint missing after the last match (one timepoint only)
 spine_registry_wide.csv,status (artifact),enum value,artifact,Artifact / false detection (blind spot or algorithm)
 spine_registry_wide.csv,status (ignored),enum value,ignored,Out-of-focus / not trackable
 spine_registry_wide.csv,status (censored),enum value,censored,Blind spot censored observation
-spine_registry_wide.csv,status (absent),enum value,absent,No match and no fate
+spine_registry_wide.csv,status (absent),enum value,absent,No match and no fate: before NEW or after LOST only
 spine_registry_wide.csv,status (single_tp_only),enum value,single_tp_only,"Fate=ignore set locally at this timepoint only (match cleared first, no detection claimed here); see fate=ignore"
 spine_registry_wide.csv,fate_<timepoint>,per_timepoint,"(empty);lost;artifact;new;ignore;false_positive_artifact;false_positive_ignore",Raw fate label at timepoint
 spine_registry_wide.csv,fate (lost),enum value,lost,Inferred or marked lost
@@ -35,7 +35,7 @@ spine_registry_derived.csv,lineage_id,fixed,,Derived display ID: L_<lineage_key>
 spine_registry_derived.csv,lineage_key,fixed,,Global spine ID (S_*) of the anchor timepoint -- join key
 spine_registry_derived.csv,event_<timepoint>,per_timepoint,appeared_at_<tp>;lost_at_<tp>,Derived formation/loss event tags at timepoint
 spine_registry_derived.csv,event (appeared_at),pattern,appeared_at_<tp>,"First genuine appearance after an unmarked, uncensored gap at this timepoint"
-spine_registry_derived.csv,event (lost_at),pattern,lost_at_<tp>,Last continuously-present timepoint before a confirmed (non-censored) loss
+spine_registry_derived.csv,event (lost_at),pattern,lost_at_<tp>,The LOST timepoint: first timepoint missing after the last match (non-censored loss)
 spine_registry_derived.csv,formation_tp,fixed,,Timepoint of the appeared_at_* event, if any (empty otherwise)
 spine_registry_derived.csv,lifecycle,fixed,"stable;transient;persistent_engram;right_censored;censored_interval;unclassified",Overall lineage lifecycle classification
 spine_registry_derived.csv,lifecycle (stable),enum value,stable,Present continuously across every timepoint the lineage spans

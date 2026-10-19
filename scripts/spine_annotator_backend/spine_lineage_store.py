@@ -28,6 +28,16 @@ SOURCE_LOCAL_ARTIFACT = "local_artifact"
 SOURCE_LOCAL_NEW = "local_new"
 SOURCE_LOCAL_LOST = "local_lost"
 SOURCE_RETURNED_TO_POOL = "returned_to_pool"
+SOURCE_LOST_INFERRED_PREFIX = "lost_inferred_after_"
+
+# Fates the inference pass writes itself. They are cleared and re-derived on
+# every finalize so a re-saved lineage always follows the current rules.
+_INFERRED_SOURCE_PREFIXES = (
+    SOURCE_LOST_INFERRED_PREFIX,
+    "lost_propagated_after_",
+    "ignore_inferred_after_",
+    "ignore_propagated_after_",
+)
 
 
 def decision_scope(td: dict) -> str:
@@ -37,46 +47,6 @@ def decision_scope(td: dict) -> str:
 
 def is_local_decision(td: dict) -> bool:
     return decision_scope(td) == DECISION_SCOPE_LOCAL
-
-
-def validate_contiguity(
-    per_tp: Dict[str, dict],
-    timepoint_names: List[str],
-) -> Optional[str]:
-    """Validate no gaps in matched timepoints. Return error string if invalid, None if OK.
-
-    A valid lineage has matched TPs forming one continuous block: M...M with no C gaps.
-    Patterns like MCMMM (matched, gap, matched) are forbidden.
-    """
-    if not timepoint_names:
-        return None
-
-    # Find first and last matched TP
-    first_match_idx = None
-    last_match_idx = None
-    matched_indices = []
-
-    for i, tp in enumerate(timepoint_names):
-        td = per_tp.get(tp) or {}
-        sid = str(td.get("spine_id") or "").strip()
-        if sid:
-            if first_match_idx is None:
-                first_match_idx = i
-            last_match_idx = i
-            matched_indices.append(i)
-
-    # No matches or single match is always OK
-    if not matched_indices or len(matched_indices) == 1:
-        return None
-
-    # Check for gap: if we have matches but some indices between first and last are missing
-    for i in range(first_match_idx, last_match_idx + 1):
-        if i not in matched_indices:
-            # Found a gap
-            gap_tp = timepoint_names[i]
-            return f"Gap in lineage: spine matched at {timepoint_names[first_match_idx]} and {timepoint_names[last_match_idx]}, but missing at {gap_tp}. Matched timepoints must form one continuous block."
-
-    return None
 
 
 def is_single_tp_focus_ignore(td: dict) -> bool:
@@ -287,24 +257,18 @@ def _has_present_match_after(
     return False
 
 
-def _mark_lost_from_index(
+def _mark_lost_at(
     out: Dict[str, dict],
     timepoint_names: List[str],
-    start_i: int,
+    i: int,
     disappeared_after: str,
 ) -> None:
-    for j in range(start_i, len(timepoint_names)):
-        tj = timepoint_names[j]
-        tdj = out[tj]
-        if _tp_is_censored(tdj):
-            return
-        if _tp_is_present(tdj):
-            return
-        if _tp_is_unmarked_gap(tdj):
-            tdj["fate"] = "lost"
-            tdj["spine_id"] = None
-            tag = "lost_inferred_after_" if j == start_i else "lost_propagated_after_"
-            tdj["source"] = f"{tag}{disappeared_after}"
+    """LOST at the first missing TP only; every later TP stays empty (ABSENT)."""
+    td = out[timepoint_names[i]]
+    if _tp_is_unmarked_gap(td):
+        td["fate"] = "lost"
+        td["spine_id"] = None
+        td["source"] = f"{SOURCE_LOST_INFERRED_PREFIX}{disappeared_after}"
 
 
 def _mark_ignore_from_index(
@@ -344,57 +308,63 @@ def _tail_has_censored_or_present(
     return censored, present
 
 
-def _shift_stack_coords(
-    x: float,
-    y: float,
-    src_tp: str,
-    dst_tp: str,
-    *,
-    pre_tp: str,
-    shifts: Dict[str, Tuple[float, float, float]],
-) -> Tuple[float, float]:
-    sx_s, sy_s, _ = shifts.get(src_tp, (0.0, 0.0, 0.0))
-    sx_d, sy_d, _ = shifts.get(dst_tp, (0.0, 0.0, 0.0))
-    if src_tp != pre_tp:
-        x, y = x - sx_s, y - sy_s
-    if dst_tp != pre_tp:
-        x, y = x + sx_d, y + sy_d
-    return x, y
+def _strip_inferred_fates(
+    per_tp: Dict[str, dict],
+    timepoint_names: List[str],
+) -> Dict[str, dict]:
+    """Clear LOST / IGNORE fates written by an earlier inference pass."""
+    out = {tp: dict(per_tp.get(tp) or {}) for tp in timepoint_names}
+    for tp in timepoint_names:
+        td = out[tp]
+        if is_local_decision(td):
+            continue
+        src = str(td.get("source") or "").strip().lower()
+        if any(src.startswith(prefix) for prefix in _INFERRED_SOURCE_PREFIXES):
+            td["fate"] = None
+            td["spine_id"] = None
+            td["source"] = "cleared"
+    return out
 
 
-def _gap_should_infer_ignore(
-    tp: str,
-    last_seen_td: dict,
-    *,
-    last_seen_tp: str,
-    pre_tp: str,
-    oof_segments: Optional[List[dict]],
-    ignored_by_tp: Optional[Dict[str, set]],
-    shifts: Optional[Dict[str, Tuple[float, float, float]]],
-) -> bool:
-    """Empty gap after a match → IGNORE when track falls in OOF / ignored region."""
-    if str(last_seen_td.get("fate") or "").strip().lower() == "ignore":
-        return True
-    lx = last_seen_td.get("x")
-    ly = last_seen_td.get("y")
-    if lx is not None and ly is not None and oof_segments:
-        from . import oof_segment_store
+def validate_lineage_shape(
+    per_tp: Dict[str, dict],
+    timepoint_names: List[str],
+) -> Optional[str]:
+    """Return an error string when the lineage breaks the ABSENT/NEW/LOST rules.
 
-        x, y = _shift_stack_coords(
-            float(lx),
-            float(ly),
-            last_seen_tp,
-            tp,
-            pre_tp=pre_tp,
-            shifts=shifts or {},
+    Valid shape: [empty...] -> one continuous block of matches -> [LOST] -> [empty...].
+    - No gap, ARTIFACT or IGNORE between two matched timepoints (a lineage is never split).
+    - After the last match only the first timepoint may carry LOST; the rest must
+      be empty (ABSENT). Anything else after the loss disqualifies the lineage.
+    Lineages holding a Timepoint-mode local decision are left to their own rules.
+    """
+    if any(is_local_decision(per_tp.get(tp) or {}) for tp in timepoint_names):
+        return None
+    present = [_tp_is_present(per_tp.get(tp) or {}) for tp in timepoint_names]
+    if not any(present):
+        return None
+    first = present.index(True)
+    last = len(present) - 1 - present[::-1].index(True)
+    for i in range(first, last + 1):
+        if not present[i]:
+            return (
+                f"Lineage cannot be split: matched at {timepoint_names[first]} and "
+                f"{timepoint_names[last]} but not at {timepoint_names[i]}. "
+                "Matched timepoints must form one continuous block."
+            )
+    for i in range(last + 1, len(timepoint_names)):
+        tp = timepoint_names[i]
+        td = per_tp.get(tp) or {}
+        if _tp_is_unmarked_gap(td) or _is_false_positive_mark(td):
+            continue
+        fate = str(td.get("fate") or "").strip().lower()
+        if i == last + 1 and fate == "lost":
+            continue
+        return (
+            f"After the spine is LOST only ABSENT is allowed, but {tp} is "
+            f"'{_status_for_tp(td)}'. Clear it or end the lineage there."
         )
-        if oof_segment_store.coords_in_oof(x, y, tp, oof_segments):
-            return True
-    if ignored_by_tp and ignored_by_tp.get(tp):
-        if lx is not None and ly is not None and oof_segments:
-            return False
-        return True
-    return False
+    return None
 
 
 def infer_lost_after_last_match(
@@ -406,24 +376,23 @@ def infer_lost_after_last_match(
     ignored_by_tp: Optional[Dict[str, set]] = None,
     shifts: Optional[Dict[str, Tuple[float, float, float]]] = None,
 ) -> tuple[Dict[str, dict], str, str, str, bool]:
-    """Infer LOST or IGNORE when later TPs have no match and no fate.
+    """Infer LOST at the first empty timepoint after the last match.
 
-    IGNORE (not LOST) when the gap falls in an OOF / ignored region (FOV edge).
-    Blind-spot ARTIFACT (clear + artifact) is censored and never inferred as LOST.
+    Only that timepoint is LOST; later timepoints stay empty (ABSENT). The gap is
+    always LOST - an OOF region or ignored spine nearby never turns it into
+    IGNORE (censoring is manual only). oof_segments / ignored_by_tp / shifts are
+    accepted for call-site compatibility and not used.
 
     Summary fields returned:
     - last_seen_tp: last timepoint with observed presence
-    - disappeared_at_tp: last timepoint with observed presence before the loss
-      (empty if not lost) — per the LOST convention, a spine is lost at the last
-      TP it was seen, not the first TP it went missing.
-    - censored_from_tp: first censored / OOF-ignore timepoint (empty if fully tracked)
+    - disappeared_at_tp: the timepoint marked LOST (empty if not lost)
+    - censored_from_tp: first censored / ignored timepoint (empty if fully tracked)
     """
     out = {tp: dict(per_tp.get(tp) or {}) for tp in timepoint_names}
     last_seen_tp = ""
     disappeared_at_tp = ""
     censored_from_tp = ""
     right_censored = False
-    anchor_pre = str(pre_tp or (timepoint_names[0] if timepoint_names else ""))
 
     for i, tp in enumerate(timepoint_names):
         td = out[tp]
@@ -442,14 +411,8 @@ def infer_lost_after_last_match(
             continue
 
         if fate == "lost" and not _tp_is_present(td):
-            if not disappeared_at_tp:
-                disappeared_at_tp = last_seen_tp
-            _mark_lost_from_index(
-                out,
-                timepoint_names,
-                i + 1,
-                last_seen_tp,
-            )
+            if last_seen_tp and not disappeared_at_tp:
+                disappeared_at_tp = tp
             break
 
         if fate == "ignore" and not _tp_is_present(td) and not _is_false_positive_mark(td):
@@ -481,55 +444,11 @@ def infer_lost_after_last_match(
             continue
 
         if _tp_is_unmarked_gap(td):
-            last_i = timepoint_names.index(last_seen_tp)
-            has_censored_after = any(
-                _tp_is_censored(out.get(timepoint_names[k]) or {})
-                for k in range(last_i + 1, len(timepoint_names))
-            )
-            if has_censored_after:
-                present_after_last = any(
-                    _tp_is_present(out.get(timepoint_names[k]) or {})
-                    for k in range(last_i + 1, len(timepoint_names))
-                )
-                if not present_after_last:
-                    if not censored_from_tp:
-                        for k in range(last_i + 1, len(timepoint_names)):
-                            if _tp_is_censored(out.get(timepoint_names[k]) or {}):
-                                censored_from_tp = timepoint_names[k]
-                                break
-                    right_censored = all(
-                        _tp_is_censored(out.get(timepoint_names[k]) or {})
-                        or _tp_is_unmarked_gap(out.get(timepoint_names[k]) or {})
-                        for k in range(last_i + 1, len(timepoint_names))
-                    ) and _tp_is_censored(out.get(timepoint_names[-1]) or {})
-                    break
-            last_seen_td = out.get(last_seen_tp) or {}
-            if _gap_should_infer_ignore(
-                tp,
-                last_seen_td,
-                last_seen_tp=last_seen_tp,
-                pre_tp=anchor_pre,
-                oof_segments=oof_segments,
-                ignored_by_tp=ignored_by_tp,
-                shifts=shifts,
-            ):
-                if not censored_from_tp:
-                    censored_from_tp = tp
-                td["fate"] = "ignore"
-                td["spine_id"] = None
-                td["source"] = f"ignore_inferred_after_{last_seen_tp}"
-                _mark_ignore_from_index(out, timepoint_names, i + 1, last_seen_tp)
-                break
-            # Lineage ends at last_seen_tp (last visible). A LOST timepoint carries no
-            # spine_id (see _mark_lost_from_index), so writing the lost fate here does
-            # not conflict with gap TPs returning their matches to the pool.
-            _mark_lost_from_index(
-                out,
-                timepoint_names,
-                i,
-                last_seen_tp,
-            )
-            disappeared_at_tp = last_seen_tp
+            # Lineage ends at last_seen_tp; this first missing TP is LOST. A LOST
+            # timepoint carries no spine_id, so gap TPs still return their
+            # matches to the pool.
+            _mark_lost_at(out, timepoint_names, i, last_seen_tp)
+            disappeared_at_tp = tp
             break
 
     if right_censored:
@@ -640,7 +559,9 @@ def _finalize_lineage_per_tp(
     shifts: Optional[Dict[str, Tuple[float, float, float]]] = None,
 ) -> tuple[Dict[str, dict], str, str, str, bool]:
     without_fp = remove_false_positive_observations(
-        per_tp, timepoint_names, pre_spine_id=pre_spine_id
+        _strip_inferred_fates(per_tp, timepoint_names),
+        timepoint_names,
+        pre_spine_id=pre_spine_id,
     )
     # NEW is exempted only at the session's true first timepoint - there is no
     # earlier data to compare against there, by definition. A lineage whose own
@@ -756,6 +677,13 @@ def save_decision(
     lineages: List[dict] = list(data.get("lineages") or [])
     key = str(lineage_key or pre_spine_id).strip()
     local_anchor = str(pre_spine_id).strip()
+    # Validate what the user submitted, before release_unbound_matches() can
+    # silently drop a match after a gap.
+    shape_error = validate_lineage_shape(
+        _strip_inferred_fates(per_tp, timepoint_names), timepoint_names
+    )
+    if shape_error:
+        raise ValueError(shape_error)
     finalized, last_seen_tp, disappeared_at_tp, censored_from_tp, right_censored = (
         _finalize_lineage_per_tp(
         per_tp,
@@ -768,11 +696,6 @@ def save_decision(
         shifts=shifts,
     )
     )
-
-    # Validate contiguity: no gaps allowed
-    contiguity_error = validate_contiguity(finalized, timepoint_names)
-    if contiguity_error:
-        raise ValueError(contiguity_error)
 
     first_seen_tp, _, _, _ = _derive_lineage_summary(finalized, timepoint_names)
 
@@ -1099,7 +1022,8 @@ def _derive_events_and_lifecycle(
             if any(censored[k] for k in range(y + 1, len(timepoint_names))):
                 continue
             termination_idx = y
-    termination_tp = timepoint_names[termination_idx] if termination_idx is not None else ""
+    # The loss event sits on the LOST timepoint: the first one after the last match.
+    termination_tp = timepoint_names[termination_idx + 1] if termination_idx is not None else ""
     if termination_tp:
         current = events.get(termination_tp, "")
         events[termination_tp] = (

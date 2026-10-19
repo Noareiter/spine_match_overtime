@@ -2867,7 +2867,7 @@ def set_fate(req: SetFateRequest) -> SelectSpineResponse:
         if tp not in pos_map and tp not in _STATE.positions:
             raise ValueError(f"Timepoint '{tp}' not active.")
         if fate and review_mode != REVIEW_MODE_TIMEPOINT:
-            raise ValueError("Press S (or click the mode button) for timepoint mode, then use A / I / N / L.")
+            raise ValueError("Press S (or click the mode button) for timepoint mode, then use A / I.")
         active = _current_anchor_timepoint()
         if _is_duplicate_phase():
             active = _conflict_timepoint() or active

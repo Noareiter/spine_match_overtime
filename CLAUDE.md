@@ -174,8 +174,11 @@ After user confirms all matches, the app infers **fate** for each spine:
 | `NEW` | Spine appears for first time at this TP |
 | `ARTIFACT` | False positive (algorithm error); no spine exists |
 | `IGNORE` | Spine exists but out-of-frame (OOF) at this TP |
-| `LOST` | Spine was present in baseline, missing at this TP without other fate |
+| `LOST` | First timepoint missing after the last match (one TP only; always LOST, even inside an OOF region) |
+| `absent` | Before NEW or after LOST only; never ABSENT→NEW→ABSENT |
 | `CENSORED` | Data quality issue; not counted as lost |
+
+Save is blocked (`validate_lineage_shape`) when a lineage is split by a gap / ARTIFACT / IGNORE between matches, or when anything but ABSENT follows LOST.
 
 ---
 
