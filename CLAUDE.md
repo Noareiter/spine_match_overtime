@@ -381,12 +381,13 @@ See `docs/spine_annotator_output_fields.csv` for full field reference.
 - `fastapi`, `uvicorn` — Web framework
 - `pandas`, `numpy` — Data processing
 - `pydantic` — Request/response validation
-- `tifffile` — TIFF image loading (demo only)
+- `tifffile` — TIFF image loading
+- `scipy`, `matplotlib` — used by the vendored `track_hybrid.py`
 
-### **External Scripts**:
-- `D:\learning_project_spines\scripts\hybrid_tracking\track_hybrid.py`
-- `D:\learning_project_spines\scripts\step2-spine tracking\spine_matching_tool\utils.py`
-- Set via `SPINE_TRACKING_SCRIPTS` env var if path changes
+### **Vendored Scripts** (`scripts/spine_annotator_backend/vendor/`):
+- `track_hybrid.py` — hybrid feature scoring (copied from `learning_project_spines/scripts/hybrid_tracking/`)
+- `spine_matching_utils.py` — `load_stack` (copied from `learning_project_spines/scripts/step2-spine tracking/spine_matching_tool/utils.py`)
+- `D:\DeepNetSpineMatching` keeps byte-identical copies; `tests/test_crop_parity.py` checks they stay in sync
 
 ---
 

@@ -171,8 +171,6 @@ def _parse_registry(path: Path, timepoint_names: List[str], *, fov: int) -> List
             members: Dict[str, dict] = {}
             for tp in timepoint_names:
                 sid = str(row.get(f"id_{tp}", "") or "").strip()
-                if sid.startswith("bridge_"):
-                    continue
                 if sid and sid.lower() not in {"nan", "none"}:
                     members[tp] = {
                         "spine_id": sid,
@@ -311,7 +309,6 @@ def _orphan_spine_ids_at_tp(tp: str, respan: Path) -> List[str]:
         sid for sid in _sort_spine_ids(list(lookup.keys()))
         if sid not in claimed
         and sid not in tagged_spines
-        and not str(sid).startswith("bridge_")
         and not _is_spine_ignored(tp, sid)
     ]
     return orphans
@@ -1157,8 +1154,7 @@ def _attach_results_final(respan: Path, out: dict, *, rebuild: bool = True) -> N
 
 def _apply_fate_rules(positions: Dict[str, dict]) -> Dict[str, dict]:
     tps = _STATE.timepoint_names
-    out = spine_lineage_store.strip_bridge_fates(positions, tps)
-    out = {k: dict(v) for k, v in out.items()}
+    out = {tp: dict(positions.get(tp) or {}) for tp in tps}
     for i, tp in enumerate(tps):
         pos = dict(out.get(tp) or {})
         pos.setdefault("fate", None)

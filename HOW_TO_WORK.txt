@@ -133,14 +133,12 @@ SPINE MATCH OVERTIME — איך לעבוד
 5. תלויות חיצוניות
 ================================================================================
 
-  התאמת ספיינים (scoring) משתמשת בסקריפטים מ:
-    D:\learning_project_spines\scripts\
-      hybrid_tracking\track_hybrid.py
-      step2-spine tracking\spine_matching_tool\utils.py
+  התאמת ספיינים (scoring) משתמשת בסקריפטים שנמצאים בתוך הפרויקט:
+    scripts\spine_annotator_backend\vendor\
+      track_hybrid.py
+      spine_matching_utils.py
 
-  לשנות נתיב: משתנה סביבה SPINE_TRACKING_SCRIPTS
-
-  Python packages: fastapi, uvicorn, numpy, pandas, pydantic, tifffile
+  Python packages: fastapi, uvicorn, numpy, pandas, pydantic, tifffile, scipy, matplotlib
 
 ================================================================================
 6. פתרון בעיות

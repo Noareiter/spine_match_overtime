@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import csv
-import importlib.util
 import re
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -36,7 +34,7 @@ _SKIP_DIR_NAMES = {"tables", "results", "old_inffered", "__pycache__"}
 
 
 class _SimpleInputProvenance:
-    """Fallback layout discovery when input_provenance.py is unavailable."""
+    """Timepoint-folder discovery for the respan/ layout."""
 
     @staticmethod
     def list_respan_timepoint_dirs(respan_root: Path) -> List[Path]:
@@ -77,21 +75,7 @@ class _SimpleInputProvenance:
 
 
 def _import_input_provenance():
-    """Try to import input_provenance.py, fall back to simple implementation if not available."""
-    from .project_paths import ASSUME_T1_T2_DIR
-
-    prov_path = ASSUME_T1_T2_DIR / "input_provenance.py"
-    if prov_path.is_file():
-        try:
-            spec = importlib.util.spec_from_file_location("input_provenance_layout", prov_path)
-            if spec is not None and spec.loader is not None:
-                mod = importlib.util.module_from_spec(spec)
-                sys.modules.setdefault("input_provenance_layout", mod)
-                spec.loader.exec_module(mod)
-                return mod
-        except Exception:
-            pass
-    # Fallback: use simple implementation
+    """Timepoint-folder discovery helpers for the respan layout."""
     return _SimpleInputProvenance()
 
 

@@ -162,7 +162,7 @@ def spines_inside_shape(
         return []
     out: List[str] = []
     for sid, rec in spine_lookup.items():
-        if str(sid).startswith("bridge_") or str(sid).startswith("artifact_"):
+        if str(sid).startswith("artifact_"):
             continue
         x = rec.get("x")
         y = rec.get("y")

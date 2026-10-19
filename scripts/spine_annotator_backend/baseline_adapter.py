@@ -16,8 +16,8 @@ from .project_paths import tracking_scripts_root
 logger = logging.getLogger(__name__)
 
 _PROJECT_SCRIPTS_DIR = tracking_scripts_root()
-HYBRID_PATH = _PROJECT_SCRIPTS_DIR / "hybrid_tracking" / "track_hybrid.py"
-SPINE_UTILS_PATH = _PROJECT_SCRIPTS_DIR / "step2-spine tracking" / "spine_matching_tool" / "utils.py"
+HYBRID_PATH = _PROJECT_SCRIPTS_DIR / "track_hybrid.py"
+SPINE_UTILS_PATH = _PROJECT_SCRIPTS_DIR / "spine_matching_utils.py"
 
 
 def _load_module(module_name: str, file_path: Path):

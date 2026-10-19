@@ -17,13 +17,6 @@ if not defined PY (
   exit /b 1
 )
 
-%PY% -u -m scripts.spine_annotator_backend.respan_ready_import --from-config config\annotator.json
-if %ERRORLEVEL% neq 0 (
-  echo ERROR: respan_ready_import pre-check failed.
-  pause
-  exit /b 1
-)
-
 %PY% -u scripts\run_annotator.py --config config\annotator.json
 set ERR=%ERRORLEVEL%
 echo.

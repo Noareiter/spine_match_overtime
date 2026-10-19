@@ -102,7 +102,7 @@ class SpineCatalog:
         return dict(self.global_by_tp.get(str(timepoint), {}))
 
     def to_local(self, timepoint: str, spine_id: str) -> str:
-        """Return local CSV id; pass through manual_/bridge_/already-global unknown."""
+        """Return local CSV id; pass through manual_/artifact_/already-global unknown."""
         sid = str(spine_id or "").strip()
         if not sid or manual_or_special(sid):
             return sid
@@ -133,7 +133,7 @@ class SpineCatalog:
 
 def manual_or_special(spine_id: str) -> bool:
     s = str(spine_id or "").strip()
-    return s.startswith("manual_") or s.startswith("bridge_") or s.startswith("artifact_")
+    return s.startswith("manual_") or s.startswith("artifact_")
 
 
 def build_catalog(

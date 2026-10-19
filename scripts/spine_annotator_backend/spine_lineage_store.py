@@ -154,37 +154,15 @@ def _is_observed_match(td: dict) -> bool:
     if _is_blind_spot(td) or _is_false_positive_mark(td):
         return False
     fate = str(td.get("fate") or "").strip().lower()
-    if fate in ("lost", "artifact", "ignore", "bridge"):
+    if fate in ("lost", "artifact", "ignore"):
         return False
     sid = str(td.get("spine_id") or "").strip()
-    if not sid or sid.startswith("bridge_") or sid.startswith("artifact_"):
+    if not sid or sid.startswith("artifact_"):
         return False
     src = str(td.get("source") or "").strip().lower()
-    if src in ("false_positive_removed", "bridge_assumed", "false_positive_bridged"):
+    if src in ("false_positive_removed", "false_positive_bridged"):
         return False
     return True
-
-
-def strip_bridge_fates(
-    per_tp: Dict[str, dict],
-    timepoint_names: List[str],
-) -> Dict[str, dict]:
-    """Remove legacy bridge labels and synthetic bridge_* IDs."""
-    out = {tp: dict(per_tp.get(tp) or {}) for tp in timepoint_names}
-    for tp in timepoint_names:
-        td = out[tp]
-        fate = str(td.get("fate") or "").strip().lower()
-        sid = str(td.get("spine_id") or "").strip()
-        src = str(td.get("source") or "").strip().lower()
-        if fate != "bridge" and not sid.startswith("bridge_") and not src.startswith("bridge_"):
-            continue
-        td["fate"] = None
-        td["spine_id"] = None
-        td.pop("continuity", None)
-        for key in ("x", "y", "z"):
-            td.pop(key, None)
-        td["source"] = "cleared"
-    return out
 
 
 def _lineage_continuous_present(td: dict) -> bool:
@@ -274,14 +252,12 @@ def _tp_is_present(td: dict) -> bool:
     if _is_blind_spot(td) or _is_false_positive_mark(td):
         return False
     fate = str(td.get("fate") or "").strip().lower()
-    if fate in ("lost", "artifact", "ignore", "bridge"):
+    if fate in ("lost", "artifact", "ignore"):
         return False
     src = str(td.get("source") or "").strip().lower()
-    if src in ("false_positive_removed", "bridge_unfulfilled", "bridge_assumed"):
+    if src == "false_positive_removed":
         return False
     sid = str(td.get("spine_id") or "").strip()
-    if sid.startswith("bridge_"):
-        return False
     return bool(sid)
 
 
@@ -666,7 +642,6 @@ def _finalize_lineage_per_tp(
     without_fp = remove_false_positive_observations(
         per_tp, timepoint_names, pre_spine_id=pre_spine_id
     )
-    without_bridge = strip_bridge_fates(without_fp, timepoint_names)
     # NEW is exempted only at the session's true first timepoint - there is no
     # earlier data to compare against there, by definition. A lineage whose own
     # review happened to start later (e.g. reviewed via a later timepoint's
@@ -675,7 +650,7 @@ def _finalize_lineage_per_tp(
     # a confirmed absence and NEW is still inferable there.
     session_first_tp = timepoint_names[0] if timepoint_names else anchor_timepoint
     with_new = infer_new_at_first_match(
-        without_bridge, timepoint_names, anchor_timepoint=session_first_tp
+        without_fp, timepoint_names, anchor_timepoint=session_first_tp
     )
     trimmed = release_unbound_matches(with_new, timepoint_names)
     finalized, _infer_last, disappeared_at_tp, censored_from_tp, right_censored = (

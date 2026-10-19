@@ -15,9 +15,10 @@ Two checks:
      crop_service.py, run against the same real demo TIFF stack and the same
      coordinates, must produce byte-identical arrays (numpy.testing.assert_array_equal)
      at both the model input shape (41x41x5) and the display/UI shape (96x96x13).
-  2. Provenance parity: both repos must resolve `SPINE_UTILS_PATH` (the
-     external, shared `load_stack` implementation) to the exact same file on
-     disk, via the same env-var-or-default logic in `project_paths.py`.
+  2. Provenance parity: both repos vendor the same `load_stack`
+     implementation (`vendor/spine_matching_utils.py`) and the same
+     `vendor/track_hybrid.py`, byte-identical, resolved the same way in
+     `project_paths.py`.
 
 crop_service.py has no relative imports (pure numpy + typing), so both
 copies can be loaded side by side as distinctly-named modules via
@@ -164,8 +165,8 @@ class TestLoadStackProvenanceParity(unittest.TestCase):
     baseline_adapter.py can't be loaded standalone via importlib (it does
     package-relative imports like `from .project_paths import ...`), so
     parity here is checked at the source level: both repos' `load_stack`
-    must delegate to the exact same external utils.py, resolved through
-    the same env-var-or-default logic.
+    must delegate to byte-identical vendored copies of spine_matching_utils.py,
+    resolved through the same logic.
     """
 
     def test_load_stack_definitions_are_textually_identical(self):
@@ -182,17 +183,22 @@ class TestLoadStackProvenanceParity(unittest.TestCase):
         deepnet_block = _extract_def_block(deepnet_src, "tracking_scripts_root")
         self.assertEqual(here_block, deepnet_block)
 
-        # Both repos must default to (or env-override to) the same
-        # external utils.py - that's the actual load_stack implementation.
-        self.assertIn(r"D:\learning_project_spines\scripts", here_src)
-        self.assertIn(r"D:\learning_project_spines\scripts", deepnet_src)
 
     def test_spine_utils_path_suffix_is_identical(self):
         here_src = _read_source(BACKEND_DIR / "baseline_adapter.py")
         deepnet_src = _read_source(DEEPNET_BACKEND_DIR / "baseline_adapter.py")
-        needle = 'step2-spine tracking" / "spine_matching_tool" / "utils.py"'
+        needle = '_PROJECT_SCRIPTS_DIR / "spine_matching_utils.py"'
         self.assertIn(needle, here_src)
         self.assertIn(needle, deepnet_src)
+
+    def test_vendored_files_are_identical(self):
+        # utils.py is the actual load_stack implementation; track_hybrid.py
+        # holds the feature scoring. Both must stay in lockstep across repos.
+        for name in ("spine_matching_utils.py", "track_hybrid.py"):
+            with self.subTest(name=name):
+                here = _read_source(BACKEND_DIR / "vendor" / name)
+                deepnet = _read_source(DEEPNET_BACKEND_DIR / "vendor" / name)
+                self.assertEqual(here, deepnet)
 
 
 if __name__ == "__main__":
