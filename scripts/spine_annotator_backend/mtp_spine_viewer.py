@@ -2801,20 +2801,38 @@ def clear_tp(req: ClearTpRequest) -> SelectSpineResponse:
         pos_map = _active_positions()
         if tp not in pos_map and tp not in _STATE.positions:
             raise ValueError(f"Timepoint '{tp}' not active.")
-        pos = dict(pos_map.get(tp) or {})
-        pos["spine_id"] = None
-        pos["fate"] = None
-        pos["artifact_mode"] = None
-        pos["removed_spine_id"] = None
-        pos.pop("decision_scope", None)
-        pos["source"] = "cleared"
-        pos_map[tp] = pos
-        # No silent trimming: if this leaves a gap, Save refuses with the reason
-        # (a lineage is never split) and the user decides what to clear.
+        tps = list(_STATE.timepoint_names)
+        to_clear = [tp]
+        # Lineage mode: clearing a timepoint after the spine has appeared means
+        # it disappeared there, so every later timepoint is cleared too (a
+        # lineage is never split; Save then infers LOST at tp). Clearing before
+        # the first match only moves the start (NEW is inferred later).
+        # Timepoint mode clears the anchor timepoint only.
+        if _STATE.review_mode == REVIEW_MODE_LINEAGE and tp in tps:
+            i = tps.index(tp)
+            seen_before = any(
+                str((pos_map.get(t) or {}).get("spine_id") or "").strip() for t in tps[:i]
+            )
+            if seen_before:
+                to_clear = tps[i:]
+        for t in to_clear:
+            if t not in pos_map and t != tp:
+                continue
+            pos = dict(pos_map.get(t) or {})
+            pos["spine_id"] = None
+            pos["fate"] = None
+            pos["artifact_mode"] = None
+            pos["removed_spine_id"] = None
+            pos.pop("decision_scope", None)
+            pos["source"] = "cleared"
+            pos_map[t] = pos
         _set_active_positions(_apply_fate_rules(pos_map))
-        return _select_spine_response(
-            message=f"Cleared {tp}.",
+        msg = (
+            f"Cleared {tp} and every later timepoint — the spine disappears at {tp} (LOST on save)."
+            if len(to_clear) > 1
+            else f"Cleared {tp}."
         )
+        return _select_spine_response(message=msg)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
