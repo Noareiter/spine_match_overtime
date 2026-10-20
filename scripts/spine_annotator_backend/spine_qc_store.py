@@ -8,7 +8,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
-from . import dendrite_link_store, ignored_spine_store, spine_catalog_store, spine_lineage_store
+from . import (
+    dendrite_link_store,
+    ignored_dendrite_store,
+    ignored_spine_store,
+    spine_catalog_store,
+    spine_lineage_store,
+    spine_qc_tag_store,
+)
 
 DISPOSITION_FILENAME = "spine_disposition.csv"
 RESOLUTIONS_FILENAME = "duplicate_resolutions.json"
@@ -16,11 +23,11 @@ RESOLUTIONS_FILENAME = "duplicate_resolutions.json"
 DISPOSITION_UNREVIEWED = "unreviewed"
 DISPOSITION_DUPLICATE = "duplicate_unresolved"
 DISPOSITION_POOL_IGNORE = "pool_ignore"
+DISPOSITION_QC_IGNORE = "qc_ignore"
+DISPOSITION_QC_ARTIFACT = "qc_artifact"
+DISPOSITION_DENDRITE_IGNORE = "dendrite_ignore"
 DISPOSITION_LINEAGE_MATCHED = "lineage_matched"
 DISPOSITION_LINEAGE_NEW = "lineage_new"
-DISPOSITION_LINEAGE_LOST = "lineage_lost"
-DISPOSITION_LINEAGE_IGNORE = "lineage_ignore"
-DISPOSITION_LINEAGE_ARTIFACT = "lineage_artifact"
 DISPOSITION_RESOLVED = "duplicate_resolved"
 
 
@@ -144,6 +151,36 @@ def comparison_timepoint_for_lineages(
     return timepoint_names[0]
 
 
+BLAST_RADIUS_TRUNCATES = "truncates"
+BLAST_RADIUS_DISSOLVES = "dissolves"
+
+
+def blast_radius_for_lineage_loss(
+    lineage: Optional[dict],
+    timepoint_names: List[str],
+    timepoint: str,
+) -> str:
+    """What happens to `lineage` if it loses its match at `timepoint`.
+
+    'truncates': timepoint is at (or after) the lineage's last present TP --
+      it just ends earlier, the rest of the lineage survives intact.
+    'dissolves': a later TP is still present -- losing timepoint leaves a
+      hole in the middle of the lineage's tracked span.
+    """
+    if not lineage:
+        return ""
+    per_tp = lineage.get("per_tp") or {}
+    try:
+        idx = timepoint_names.index(timepoint)
+    except ValueError:
+        return ""
+    for j in range(idx + 1, len(timepoint_names)):
+        td = per_tp.get(timepoint_names[j]) or {}
+        if spine_lineage_store._tp_is_present(td):
+            return BLAST_RADIUS_DISSOLVES
+    return BLAST_RADIUS_TRUNCATES
+
+
 def find_duplicate_conflicts(
     respan: Path,
     fov: int,
@@ -166,16 +203,27 @@ def find_duplicate_conflicts(
                 continue
             seen.add(cid)
             comp_tp = comparison_timepoint_for_lineages(by_key, uniq, timepoint_names)
-            conflicts.append(
-                {
-                    "conflict_id": cid,
-                    "timepoint": tp,
-                    "comparison_timepoint": comp_tp,
-                    "spine_id": sid,
-                    "lineage_keys": uniq[:2] if len(uniq) == 2 else uniq,
-                    "lineage_count": len(uniq),
-                }
-            )
+            pair = uniq[:2] if len(uniq) == 2 else uniq
+            conflict = {
+                "conflict_id": cid,
+                "timepoint": tp,
+                "comparison_timepoint": comp_tp,
+                "spine_id": sid,
+                "lineage_keys": pair,
+                "lineage_count": len(uniq),
+            }
+            if len(pair) == 2:
+                # Blast radius if this lineage LOSES the contested spine at `tp`
+                # (i.e. the other lineage is kept). Must be visible before the
+                # user commits -- losing a spine mid-lineage dissolves it, while
+                # losing it at the tail just truncates.
+                conflict["blast_radius_a"] = blast_radius_for_lineage_loss(
+                    by_key.get(pair[0]), timepoint_names, tp
+                )
+                conflict["blast_radius_b"] = blast_radius_for_lineage_loss(
+                    by_key.get(pair[1]), timepoint_names, tp
+                )
+            conflicts.append(conflict)
     return conflicts
 
 
@@ -223,21 +271,18 @@ def positions_from_lineage(
     return out
 
 
-def _disposition_from_status(status: str, fate: str) -> str:
+def _disposition_from_status(status: str, fate: str = "") -> str:
+    """Disposition of a detection held by a lineage at that timepoint.
+
+    Only NEW and matched are possible: LOST / ABSENT timepoints hold no
+    detection, and IGNORE / ARTIFACT are Timepoint-mode tags (qc_ignore /
+    qc_artifact), never lineage fates (rules review 2026-10).
+    """
     st = str(status or "").strip().lower()
-    ft = str(fate or "").strip().lower()
-    if st in ("ignored",) or ft == "ignore":
-        return DISPOSITION_LINEAGE_IGNORE
-    if st in ("artifact",) or ft == "artifact":
-        return DISPOSITION_LINEAGE_ARTIFACT
-    if st in ("lost",) or ft == "lost":
-        return DISPOSITION_LINEAGE_LOST
-    if st in ("new",) or ft == "new":
+    if st == "new":
         return DISPOSITION_LINEAGE_NEW
-    if st in ("matched", "manual", "stable"):
+    if st in ("matched", "manual"):
         return DISPOSITION_LINEAGE_MATCHED
-    if st == "single_tp_only" and ft == "ignore":
-        return DISPOSITION_LINEAGE_IGNORE
     return ""
 
 
@@ -249,6 +294,8 @@ def build_disposition_rows(
     timepoint_names: List[str],
     catalog_rows: Optional[List[dict]] = None,
     ignored_by_tp: Optional[Dict[str, set]] = None,
+    qc_tags: Optional[Dict[str, Dict[str, str]]] = None,
+    ignored_dendrites_by_tp: Optional[Dict[str, set]] = None,
 ) -> Tuple[List[dict], dict]:
     if catalog_rows is None:
         cat_path = spine_catalog_store.catalog_path(respan, fov)
@@ -259,6 +306,15 @@ def build_disposition_rows(
             catalog_rows = []
     if ignored_by_tp is None:
         ignored_by_tp = ignored_spine_store.load_ignored(respan, fov)
+    if qc_tags is None:
+        qc_tags = spine_qc_tag_store.load_tags(respan, fov)
+    if ignored_dendrites_by_tp is None:
+        ignored_dendrites_by_tp = ignored_dendrite_store.load_ignored_dendrites(respan, fov)
+    dendrite_by_gid_tp: Dict[str, str] = {
+        str(cat.get("timepoint") or "") + "|" + str(cat.get("global_spine_id") or ""):
+            str(cat.get("dendrite_id") or "")
+        for cat in (catalog_rows or [])
+    }
 
     data = spine_lineage_store.load_decisions(respan, fov)
     lineages = list(data.get("lineages") or [])
@@ -285,7 +341,6 @@ def build_disposition_rows(
         lineage_key = ""
         status = ""
         fate = ""
-        event = ""
         conflict = "no"
         reviewed = "no"
 
@@ -295,6 +350,15 @@ def build_disposition_rows(
             duplicate_unresolved += 1
         elif gid in (ignored_by_tp.get(tp) or set()):
             disposition = DISPOSITION_POOL_IGNORE
+            reviewed = "yes"
+        elif str((qc_tags.get(tp) or {}).get(gid) or "") == "ignore":
+            disposition = DISPOSITION_QC_IGNORE
+            reviewed = "yes"
+        elif str((qc_tags.get(tp) or {}).get(gid) or "") == "artifact":
+            disposition = DISPOSITION_QC_ARTIFACT
+            reviewed = "yes"
+        elif str(dendrite_by_gid_tp.get(f"{tp}|{gid}") or "") in (ignored_dendrites_by_tp.get(tp) or set()):
+            disposition = DISPOSITION_DENDRITE_IGNORE
             reviewed = "yes"
         elif keys:
             primary = keys[0]
@@ -317,9 +381,12 @@ def build_disposition_rows(
                     status = spine_lineage_store.status_for_tp_data(td_anchor)
                     fate = str(td_anchor.get("fate") or "")
                     mapped = _disposition_from_status(status, fate)
-                    disposition = mapped or DISPOSITION_LINEAGE_IGNORE
-                    lineage_key = gid
-                    reviewed = "yes"
+                    # An anchor its own lineage does not hold stays unreviewed
+                    # (IGNORE is never inferred; tag it A/I or match it).
+                    if mapped:
+                        disposition = mapped
+                        lineage_key = gid
+                        reviewed = "yes"
         elif gid in anchor_keys.get(tp, set()):
             lin = spine_lineage_store.get_lineage_by_key(respan, fov, gid)
             if lin:
@@ -327,9 +394,10 @@ def build_disposition_rows(
                 status = spine_lineage_store.status_for_tp_data(td)
                 fate = str(td.get("fate") or "")
                 mapped = _disposition_from_status(status, fate)
-                disposition = mapped or DISPOSITION_LINEAGE_IGNORE
-                lineage_key = gid
-                reviewed = "yes"
+                if mapped:
+                    disposition = mapped
+                    lineage_key = gid
+                    reviewed = "yes"
 
         if disposition == DISPOSITION_UNREVIEWED:
             unreviewed += 1
@@ -343,9 +411,6 @@ def build_disposition_rows(
                 "local_spine_id": str(cat.get("local_spine_id") or ""),
                 "disposition": disposition,
                 "lineage_key": lineage_key,
-                "status": status,
-                "fate": fate,
-                "event": event,
                 "conflict": conflict,
                 "reviewed": reviewed,
             }
@@ -389,9 +454,6 @@ def rebuild_spine_disposition(
         "local_spine_id",
         "disposition",
         "lineage_key",
-        "status",
-        "fate",
-        "event",
         "conflict",
         "reviewed",
     ]
@@ -444,7 +506,17 @@ def _disposition_cache_valid(respan: Path, fov: int) -> bool:
     if not disp.is_file() or not meta["decisions"].is_file():
         return False
     try:
-        return disp.stat().st_mtime >= meta["decisions"].stat().st_mtime
+        disp_mtime = disp.stat().st_mtime
+        if disp_mtime < meta["decisions"].stat().st_mtime:
+            return False
+        for source_path in (
+            ignored_spine_store._path(respan, fov),
+            spine_qc_tag_store._path(respan, fov),
+            ignored_dendrite_store._path(respan, fov),
+        ):
+            if source_path.is_file() and disp_mtime < source_path.stat().st_mtime:
+                return False
+        return True
     except OSError:
         return False
 
@@ -498,9 +570,6 @@ def coverage_and_unreviewed(
         "local_spine_id",
         "disposition",
         "lineage_key",
-        "status",
-        "fate",
-        "event",
         "conflict",
         "reviewed",
     ]
@@ -593,7 +662,6 @@ def apply_conflict_resolution(
         )
         has_any = any(
             str((finalized.get(tp) or {}).get("spine_id") or "").strip()
-            or str((finalized.get(tp) or {}).get("fate") or "").strip()
             for tp in timepoint_names
         )
         if not has_any:
@@ -601,8 +669,8 @@ def apply_conflict_resolution(
             continue
         lin["per_tp"] = {tp: dict(finalized.get(tp) or {}) for tp in timepoint_names}
         lin["last_seen_tp"] = last_seen
-        lin["censored_from_tp"] = censored
-        lin["right_censored"] = rc
+        for stale in ("censored_from_tp", "right_censored"):
+            lin.pop(stale, None)
         updated.append(row_key)
 
     if removed:

@@ -1,6 +1,5 @@
 ================================================================================
 SPINE MATCH OVERTIME — איך לעבוד
-(English version: HOW_TO_WORK_EN.txt)
 ================================================================================
 
 מיקום הפרויקט: D:\spine_match_overtime
@@ -8,7 +7,6 @@ SPINE MATCH OVERTIME — איך לעבוד
 מבנה תיקיות:
   config\     — קובץ הגדרות (animal, workspace, timepoints)
   scripts\    — כל קוד האפליקציה (Python + backend)
-  results\    — דמו מקומי + session state של האפליקציה
   docs\       — תיאור שדות בפלט (CSV/JSON)
 
 ================================================================================
@@ -25,18 +23,7 @@ SPINE MATCH OVERTIME — איך לעבוד
   שמירת lineage משתמשת ב-lineage_key = S_* (אין התנגשות בין timepoints).
 
 ================================================================================
-1. התחלה מהירה (דמו)
-================================================================================
-
-  1. הפעל:  start_demo_annotator.bat
-  2. בדפדפן:
-       קישור דנדריטים:  http://127.0.0.1:8010/mtp/
-       מעקב ספיינים:    http://127.0.0.1:8010/mtp/viewer/?fov=1
-
-  הדמו יוצר נתונים ב: results\demo_spine_logic_lab\respan\
-
-================================================================================
-2. עבודה על בעל חיים אמיתי
+1. התחלה (עבודה על בעל חיים אמיתי)
 ================================================================================
 
   1. ערוך config\annotator.json:
@@ -44,103 +31,155 @@ SPINE MATCH OVERTIME — איך לעבוד
        workspace   — תיקיית הניסוי שלך (לא respan!)
        fovs        — רשימת FOV
        timepoint_order — סדר נקודות הזמן
+       active_timepoints — (אופציונלי) תת-סט של TPs לעבודה
 
   2. הפעל: start_annotator.bat
 
   האפליקציה תשתמש ב:
        <workspace>\respan\
-  ותיצור שם מבנה חסר (Tables, fovNSwc, results וכו').
+  ותיצור שם מבנה חסר (Tables, fovN, _annotator וכו').
 
   חשוב: workspace יכול להיות נתיב מלא (E:/...) או יחסי לפרויקט (results/...).
 
 ================================================================================
-3. זרימת העבודה (שלבים)
+2. זרימת העבודה (שלבים)
 ================================================================================
 
-  שלב א — קישור דנדריטים (Phase 1)
-  --------------------------------
+  שלב א — קישור דנדריטים (Phase 0 — Dendrite Linker)
+  ------------------------------------------------
   • טען FOV + timepoints
   • קשר dendrite_id בין נקודות זמן (אותו ענף דנדריט)
   • שמירה: respan\_annotator\fovN\dendrite_links.json
 
-  שלב ב — מעקב ספיינים לאורך זמן
-  --------------------------------
+  שלב ב — מעקב ספיינים לאורך זמן (Phase 1 — Spine Viewer)
+  -------------------------------------------------------
   • לכל spine ב-anchor (בדרך כלל pre-droplet):
-      - אשר/תקן התאמות בכל timepoint
-      - סמן fate כשצריך (ראה סעיף 4)
+      - עיין בהצעות התאמה לכל timepoint
+      - אשר/תקן/דחה התאמות
+      - סמן fate כשצריך (ראה סעיף 3)
   • Save & next → שומר lineage ומעדכן registry
   • שמירה:
       respan\_annotator\fovN\lineage_decisions.json
       respan\_annotator\fovN\spine_registry_wide.csv
 
-  קיצורי מקלדת (ב-viewer):
-  • Tab — Clear all (נקה התאמה + fate בכל timepoints)
-  • Undo — בטל שינוי אחרון על הספיין הנוכחי
+  שלב ג — פתרון קונפליקטים (Phase 2 — Duplicate Conflicts)
+  ----------------------------------------------------------
+  • אם אותו spine היה נטען לשתי lineages שונות
+  • בחר איזו lineage לשמור ואיזו מאבדת
+  • ראה blast_radius: האם הפסד הספיין "מקטע" (truncates) או "מתפרק" (dissolves) את ה-lineage
+  • שמירה: respan\_annotator\fovN\duplicate_resolutions.json
+
+  קיצורי מקלדת (ב-spine viewer):
+  • Ctrl+Enter  — שמור החלטה והעבור לספיין הבא
+  • Space       — קפוץ לסקאן לא-בדוק הבא (unreviewed detections או duplicate conflicts)
+  • Arrow Left / Arrow Right — עבור לספיין הקודם / הבא
+  • Enter (בטיפול על timepoint) — קבל הצעת התאמה נוכחית
+  • Ctrl+Z     — בטל החלטה אחרונה
 
 ================================================================================
-4. לוגיקת Fate — מה כל בחירה אומרת
+3. לוגיקת Fate — מה כל בחירה אומרת
 ================================================================================
 
   התאמה רגילה (matched)
   ---------------------
   לחיצה על spine_id מה-CSV. הספיין נצפה בנקודה זו.
 
-  NEW (אוטומטי / מפורש)
+  NEW (אוטומטי בשמירה)
   ---------------------
-  הספיין מופיע לראשונה בנקודת זמן זו — כל הנקודות הקודמות ריקות.
+  הנקודה הראשונה בשושלת, כשהיא לא נקודת הזמן הראשונה. לפניה רק ABSENT.
 
-  ARTIFACT (blind spot)
-  ---------------------
-  אזור לא ניתן לצפייה (איכות תמונה). לא נספר כ-lost — censored.
+  ARTIFACT / IGNORE (רק במצב Timepoint — מקש S, ואז A או I)
+  ---------------------------------------------------------
+  סימון של זיהוי בודד בנקודת זמן אחת בלבד, לא של שושלת.
+  • ARTIFACT — אין שם ספיין (טעות של RESPAN).
+  • IGNORE — לא לעבוד עם הזיהוי הזה.
+  אם שושלת שמורה משתמשת בזיהוי שסומן, כל השושלת נמחקת וחוזרת למאגר.
+  אין IGNORE לכל נקודות הזמן (Tab→I הוסר) ואין False+ במצב Lineage.
 
-  False + (Artifact / Ignore)
-  ---------------------------
-  • Artifact — טעות אלגוריתם, אין ספיין באמת (רק בנקודה זו, שאר TP ריקים).
-  • Ignore — ספיין קיים אך OOF בכל שאר הנקודות.
+  OOF (Mark OOF segment)
+  ----------------------
+  כל ספיין בתוך הצורה יוצא מהמאגר, רק בנקודת הזמן שעליה ציירת.
+  לנקודה אחרת — מציירים שם שוב.
 
   LOST (אוטומטי בשמירה)
   ---------------------
-  נראה בנקודות קודמות, חסר בהמשך ללא fate אחר → lost_at_<tp>.
+  נקודת הזמן הראשונה שבה הספיין חסר אחרי ההתאמה האחרונה. רק נקודה אחת.
+  כל הנקודות שאחריה: ABSENT. דוגמה: 1✓ 2✓ 3=LOST 4=ABSENT 5=ABSENT.
+  גם אם הנקודה החסרה נמצאת בתוך קטע OOF, היא LOST (צנזור הוא ידני בלבד).
+
+  ABSENT
+  ------
+  רק לפני NEW (הספיין עוד לא הופיע) או אחרי LOST (הספיין נעלם).
+  אסור ABSENT → NEW → ABSENT: אחרי הופעה ההיעלמות תמיד עוברת דרך LOST.
+
+  Clear במצב Lineage
+  ------------------
+  Clear בנקודה אחרי שהספיין כבר הופיע = הספיין נעלם שם: הנקודה וכל
+  הנקודות שאחריה מתנקות, ובשמירה היא תהיה LOST.
+  Clear לפני ההופעה הראשונה מנקה רק את אותה נקודה (הספיין מתחיל אחר כך → NEW).
+
+  חסימות בשמירה
+  -------------
+  • שושלת לא נחצית: אסור פער בין שתי התאמות (גם לא ARTIFACT / IGNORE באמצע).
+  • אחרי LOST מותר רק ABSENT. כל דבר אחר פוסל את השושלת.
+  • N לא קיים במצב Timepoint (S) — רק A / I.
 
 ================================================================================
-5. קבצי פלט ומשמעותם
+4. קבצי פלט ומשמעותם
 ================================================================================
 
-  spine_registry_wide.csv — טבלה רחבה, שורה לכל lineage:
-  • lineage_id, pre_spine_id, anchor_timepoint
-  • first_seen_tp — נוכחות ראשונה (match)
-  • last_seen_tp  — נוכחות אחרונה
-  • censored_from_tp — התחלת צנזור (artifact/OOF), לא lost
-  • lifecycle — stable | transient | persistent_engram | right_censored | ...
-  • id_<tp>, status_<tp>, fate_<tp>, event_<tp> לכל timepoint
+  spine_registry_wide.csv — טבלה רחבה, שורה לכל שושלת:
+  • lineage_id / lineage_key — מזהה השושלת
+  • first_seen_tp, last_seen_tp — הופעה ראשונה ואחרונה
+  • id_<tp>, local_id_<tp> — מזהה הספיין בכל נקודת זמן (ריק אם אין)
+  • status_<tp> — matched | new | lost | absent (| manual לספיין שהוסף ידנית)
+  • <tp>_x/_y/_z — רק בנקודות שבהן נצפה ספיין; ריק ב-absent ו-lost
 
-  lineage_decisions.json — פירוט מלא per_tp (קואורדינטות, source, fate).
+  spine_observations_long.csv — שורה לכל שושלת × נקודת זמן, עם הסטטוס
+  וכל 38 המדדים מ-RESPAN (נפח, אורך, ראש, צוואר, עוצמה, מרחק מהסומה).
+  ריק ב-absent / lost. נוח לניתוח ב-Python / R.
 
-  אירועים נגזרים (event_<tp>):
-  • appeared_at_<tp>  — הופעה ראשונה
-  • lost_at_<tp>      — אבד אחרי נוכחות
+  spine_disposition.csv — שורה לכל זיהוי: disposition (lineage_matched,
+  lineage_new, qc_artifact, qc_ignore, pool_ignore, dendrite_ignore,
+  duplicate_*, unreviewed), lineage_key, conflict, reviewed.
+
+  Results final/excluded_spines.csv — כל זיהוי שהוצא מהעבודה, עם reason:
+  artifact | ignore | oof | dendrite_ignore.
+
+  lineage_decisions.json — מקור האמת: מה נבחר בכל נקודת זמן.
+
+  duplicate_resolutions.json — קונפליקטים שנפתרו.
 
   פירוט מלא של כל שדה: docs\spine_annotator_output_fields.csv
 
 ================================================================================
-6. תלויות חיצוניות
+5. תלויות חיצוניות
 ================================================================================
 
-  התאמת ספיינים (scoring) משתמשת בסקריפטים מ:
-    D:\learning_project_spines\scripts\
-      hybrid_tracking\track_hybrid.py
-      step2-spine tracking\spine_matching_tool\utils.py
+  התאמת ספיינים (scoring) משתמשת בסקריפטים שנמצאים בתוך הפרויקט:
+    scripts\spine_annotator_backend\vendor\
+      track_hybrid.py
+      spine_matching_utils.py
 
-  לשנות נתיב: משתנה סביבה SPINE_TRACKING_SCRIPTS
-
-  Python packages: fastapi, uvicorn, numpy, pandas, tifffile (לדמו)
+  Python packages: fastapi, uvicorn, numpy, pandas, pydantic, tifffile, scipy, matplotlib
 
 ================================================================================
-7. פתרון בעיות
+6. פתרון בעיות
 ================================================================================
 
   • Excel פתוח על spine_registry_wide.csv → סגור לפני שמירה
   • שינוי קוד → Ctrl+F5 בדפדפן + הפעלה מחדש של השרת
   • workspace לא נמצא → בדוק נתיב ב-config\annotator.json וחיבור דיסק
+  • spine כבר משוייך (אדום) → עכשיו מותר לטעון אותו ל-lineage שונה.
+    זה יוצר קונפליקט שנפתר ב-Phase 2 (Duplicate Conflicts).
+
+================================================================================
+7. ממשק שדות (UI)
+================================================================================
+
+  צפייה ספיני (Spine Viewer):
+  • צד שמאל — t1 (timepoint הקודם) + עמודה ימנית עם הצעות התאמה ל-t2
+  • צד ימין — תמונות t1/t2 + כפתורים להתאמה, reject, new, lost, artifact, ignore
+  • סקאן לא-בדוק — כאשר יש זיהויים שלא טיפלת בהם עדיין (Space קופץ אליהם)
 
 ================================================================================

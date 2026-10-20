@@ -102,7 +102,7 @@ class SpineCatalog:
         return dict(self.global_by_tp.get(str(timepoint), {}))
 
     def to_local(self, timepoint: str, spine_id: str) -> str:
-        """Return local CSV id; pass through manual_/bridge_/already-global unknown."""
+        """Return local CSV id; pass through manual_/artifact_/already-global unknown."""
         sid = str(spine_id or "").strip()
         if not sid or manual_or_special(sid):
             return sid
@@ -133,7 +133,10 @@ class SpineCatalog:
 
 def manual_or_special(spine_id: str) -> bool:
     s = str(spine_id or "").strip()
-    return s.startswith("manual_") or s.startswith("bridge_") or s.startswith("artifact_")
+    return s.startswith("manual_") or s.startswith("artifact_")
+
+
+_SAME_SPOT_PX = 1.0
 
 
 def build_catalog(
@@ -142,10 +145,24 @@ def build_catalog(
     fov: int,
     timepoint_names: List[str],
     csv_by_tp: Dict[str, Path],
+    previous: Optional[SpineCatalog] = None,
 ) -> SpineCatalog:
-    """Assign S_* IDs to every row in each timepoint detection CSV."""
+    """Assign S_* IDs to every row in each timepoint detection CSV.
+
+    With a previous catalog, a detection keeps its S_* id when the same
+    (timepoint, local id) is still there at the same position (within
+    _SAME_SPOT_PX); new or moved detections get fresh ids above every id ever
+    used, so saved decisions never end up pointing at a different spine.
+    """
     rows: List[dict] = []
+    prev_by_key: Dict[Tuple[str, str], dict] = {}
     n = 1
+    if previous is not None:
+        for row in previous.rows:
+            prev_by_key[(str(row["timepoint"]), str(row["local_spine_id"]))] = row
+            gid = str(row["global_spine_id"])
+            if gid.startswith(GLOBAL_PREFIX) and gid[len(GLOBAL_PREFIX):].isdigit():
+                n = max(n, int(gid[len(GLOBAL_PREFIX):]) + 1)
     for tp in timepoint_names:
         csv_path = csv_by_tp.get(tp)
         if not csv_path or not Path(csv_path).is_file():
@@ -155,9 +172,17 @@ def build_catalog(
         df["id"] = df["id"].astype(str)
         for local_id in _sort_local_ids(df["id"].tolist()):
             rec = df[df["id"] == local_id].iloc[0]
+            old = prev_by_key.get((str(tp), str(local_id)))
+            if old is not None and all(
+                abs(float(old[k]) - float(rec[k])) <= _SAME_SPOT_PX for k in ("x", "y", "z")
+            ):
+                gid = str(old["global_spine_id"])
+            else:
+                gid = _format_global_id(n)
+                n += 1
             rows.append(
                 {
-                    "global_spine_id": _format_global_id(n),
+                    "global_spine_id": gid,
                     "animal_id": str(animal_id or ""),
                     "fov": str(fov),
                     "timepoint": str(tp),
@@ -171,7 +196,6 @@ def build_catalog(
                     "source_csv": str(csv_path),
                 }
             )
-            n += 1
     return SpineCatalog.from_rows(rows, animal_id=animal_id, fov=fov)
 
 
@@ -236,14 +260,15 @@ def ensure_catalog(
 ) -> Tuple[SpineCatalog, Path, bool]:
     """Load or build catalog. Returns (catalog, path, created)."""
     path = catalog_path(respan, fov)
-    existing = None if rebuild else load_catalog(respan, fov)
-    if existing and not _catalog_stale(path, existing, timepoint_names, csv_by_tp):
+    existing = load_catalog(respan, fov)
+    if existing and not rebuild and not _catalog_stale(path, existing, timepoint_names, csv_by_tp):
         return existing, path, False
     catalog = build_catalog(
         animal_id=animal_id,
         fov=fov,
         timepoint_names=timepoint_names,
         csv_by_tp=csv_by_tp,
+        previous=existing,
     )
     path = save_catalog(respan, fov, catalog)
     return catalog, path, True

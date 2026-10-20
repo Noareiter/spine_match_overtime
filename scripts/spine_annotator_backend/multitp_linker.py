@@ -13,6 +13,7 @@ multi-timepoint spine viewer (later phases).
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -24,7 +25,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from . import baseline_adapter, io_service
-from . import animal_config, dendrite_link_store
+from . import animal_config, dendrite_link_store, ignored_dendrite_store
 
 router = APIRouter(prefix="/mtp", tags=["multi-timepoint-dendrite-linker"])
 
@@ -78,9 +79,7 @@ def _sort_ids(ids) -> List[str]:
     return sorted({str(i) for i in ids if str(i).strip() not in {"", "nan", "None"}}, key=key)
 
 
-def _next_link_id() -> str:
-    _STATE.link_counter += 1
-    n = _STATE.link_counter
+def _format_link_id(n: int) -> str:
     a = _STATE.animal_id.strip()
     f = _STATE.fov.strip()
     if a and f:
@@ -88,6 +87,19 @@ def _next_link_id() -> str:
     if a:
         return f"{a}_D{n:03d}"
     return f"D{n:03d}"
+
+
+def _next_link_id() -> str:
+    """Next unused link id: above every existing D### number, never a reuse."""
+    used = {str(l.get("link_id") or "") for l in _STATE.links}
+    for lid in used:
+        m = re.search(r"_?D(\d+)$", lid)
+        if m:
+            _STATE.link_counter = max(_STATE.link_counter, int(m.group(1)))
+    _STATE.link_counter += 1
+    while _format_link_id(_STATE.link_counter) in used:
+        _STATE.link_counter += 1
+    return _format_link_id(_STATE.link_counter)
 
 
 def _mip_for(name: str) -> np.ndarray:
@@ -155,6 +167,12 @@ class StateResponse(BaseModel):
     links: List[dict]
     visited_link_ids: List[str] = Field(default_factory=list)
     catalog_message: str = ""
+    ignored_dendrites: Dict[str, List[str]] = Field(default_factory=dict)
+
+
+class IgnoreDendriteRequest(BaseModel):
+    timepoint: str
+    dendrite_id: str
 
 
 class MarkVisitedRequest(BaseModel):
@@ -214,11 +232,16 @@ def _state_response(*, fov: Optional[int] = None) -> StateResponse:
             )
         )
     visited: List[str] = []
+    ignored_dendrites: Dict[str, List[str]] = {}
     try:
         respan, fov_i = _respan_and_fov()
         if fov is not None:
             fov_i = int(fov)
         visited = list(dendrite_link_store.load_progress(respan, fov_i).get("visited_link_ids", []))
+        ignored_dendrites = {
+            tp: sorted(ids)
+            for tp, ids in ignored_dendrite_store.load_ignored_dendrites(respan, fov_i).items()
+        }
     except Exception:
         pass
     return StateResponse(
@@ -228,6 +251,7 @@ def _state_response(*, fov: Optional[int] = None) -> StateResponse:
         links=_STATE.links,
         visited_link_ids=visited,
         catalog_message=_STATE.catalog_message,
+        ignored_dendrites=ignored_dendrites,
     )
 
 
@@ -410,28 +434,39 @@ def clear_links() -> StateResponse:
     return _state_response()
 
 
-@router.post("/auto-link-shared", response_model=StateResponse)
-def auto_link_shared() -> StateResponse:
-    """Bootstrap: one link per dendrite ID that appears (identically) in >= 2 timepoints."""
+@router.post("/ignore-dendrite", response_model=StateResponse)
+def ignore_dendrite(req: IgnoreDendriteRequest) -> StateResponse:
+    """Ignore every spine on this dendrite at this timepoint: excluded from
+    any match candidacy and listed in the merged excluded_spines.csv."""
     try:
-        all_ids: Dict[str, Dict[str, bool]] = {}
-        for name in _STATE.timepoint_names:
-            for did in _STATE.dendrite_ids.get(name, []):
-                all_ids.setdefault(did, {})[name] = True
-        existing = {
-            tuple(sorted((tp, did) for tp, ids in l["members"].items() for did in ids))
-            for l in _STATE.links
-        }
-        for did in _sort_ids(all_ids.keys()):
-            present = [n for n in _STATE.timepoint_names if all_ids[did].get(n)]
-            if len(present) < 2:
-                continue
-            members = {n: [did] for n in present}
-            sig = tuple(sorted((tp, d) for tp, ids in members.items() for d in ids))
-            if sig in existing:
-                continue
-            _STATE.links.append({"link_id": _next_link_id(), "members": members, "notes": "auto-shared-id"})
+        if req.timepoint not in _STATE.timepoint_names:
+            raise ValueError(f"Timepoint '{req.timepoint}' is not loaded.")
+        if not req.dendrite_id.strip():
+            raise ValueError("dendrite_id is required.")
+        respan, fov = _respan_and_fov()
+        ignored_dendrite_store.add_ignored_dendrite(
+            respan, fov,
+            animal_id=_STATE.animal_id,
+            timepoint=req.timepoint,
+            dendrite_id=req.dendrite_id,
+        )
         return _state_response()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete("/ignore-dendrite/{timepoint}/{dendrite_id}", response_model=StateResponse)
+def unignore_dendrite(timepoint: str, dendrite_id: str) -> StateResponse:
+    try:
+        respan, fov = _respan_and_fov()
+        ignored_dendrite_store.remove_ignored_dendrite(
+            respan, fov, timepoint=timepoint, dendrite_id=dendrite_id
+        )
+        return _state_response()
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -509,24 +544,11 @@ def load_saved(req: LoadSavedRequest) -> StateResponse:
 def load_from_animal(fov: int = 1, timepoints: str = "") -> StateResponse:
     """Auto-configure timepoints from respan; optional comma-separated subset."""
     try:
-        from . import animal_config, animal_layout, timepoint_selection
+        from . import animal_config, animal_layout
 
         cfg = animal_config.load_config()
         respan = animal_config.require_respan_root(cfg)
-        requested = timepoint_selection.parse_timepoint_query(timepoints)
-        saved = timepoint_selection.load(respan, fov)
-        available = animal_layout.discover_available_timepoints(respan, fov)
-        selected = animal_config.resolve_active_timepoints(
-            cfg,
-            available,
-            requested=requested or None,
-            saved=saved or None,
-        )
-        if requested:
-            timepoint_selection.save(respan, fov, selected, animal_id=cfg.animal_id)
-        inv = animal_layout.build_fov_inventory(
-            respan, fov, animal_id=cfg.animal_id, selected_timepoints=selected
-        )
+        inv = animal_layout.build_fov_inventory(respan, fov, animal_id=cfg.animal_id)
         tps: List[ConfigureTimepoint] = []
         for row in inv.timepoints:
             if not row.csv_path:
@@ -644,6 +666,10 @@ _PAGE_HTML = """<!doctype html>
   .idchip input { margin:0; pointer-events:none; }
   .swatch { width:10px; height:10px; border-radius:50%; flex:0 0 auto; }
   .idchip .lk { margin-left:auto; font-size:10px; color:var(--accent); }
+  .idchip.ignored { opacity:.55; text-decoration:line-through; }
+  .idchip .ignoretag { margin-left:auto; font-size:10px; color:var(--red); text-decoration:none;
+                        border:1px solid #f1c4c4; border-radius:5px; padding:0 5px; cursor:pointer; }
+  .idchip .ignoretag:hover { background:#fdeaea; }
   .links { display:flex; flex-direction:column; gap:8px; }
   .linkitem { display:flex; align-items:center; gap:10px; padding:8px 10px; border:1px solid var(--line);
               border-radius:8px; background:#fcfdff; }
@@ -689,7 +715,6 @@ _PAGE_HTML = """<!doctype html>
       <div><label>FOV</label><input type="text" id="fovId" placeholder="1" style="width:48px"/></div>
       <button class="primary" onclick="bootstrapHub()">Reload FOV</button>
       <button class="primary" onclick="startSpineMatching()" style="background:#0f766e;border-color:#0f766e">Start spine matching</button>
-      <button onclick="autoLink()">Auto-link identical IDs</button>
       <button onclick="saveLinks()">Save links</button>
       <span style="flex:1"></span>
       <span id="linkCountLabel" class="hint" style="margin:0">0 links</span>
@@ -722,12 +747,13 @@ _PAGE_HTML = """<!doctype html>
     <h2>Group dendrites into cross-timepoint links</h2>
     <div class="toolbar">
       <button class="primary" onclick="createLink()">Create link from selection</button>
-      <button onclick="autoLink()">Auto-link identical IDs</button>
+      <button class="danger" onclick="ignoreSelectedDendrites()">Ignore selected dendrite(s)</button>
       <button class="ghost" onclick="clearSelection()">Clear selection</button>
       <span style="flex:1"></span>
       <button onclick="saveLinks()">Save links</button>
       <button class="danger ghost" onclick="clearLinks()">Clear all links</button>
     </div>
+    <div class="hint">Ignoring a dendrite excludes every spine on it from any match candidacy at that timepoint, and lists them in the merged excluded_spines.csv. Dendrite ids are per-timepoint — select the same dendrite's checkbox in another timepoint's column too if it should be ignored there as well.</div>
     <div class="columns" id="columns"></div>
   </div>
   </details>
@@ -806,15 +832,21 @@ function renderColumns(){
   const c = document.getElementById('columns'); c.innerHTML='';
   STATE.timepoints.forEach(tp=>{
     const col = document.createElement('div'); col.className='col';
+    const ignoredHere = new Set((STATE.ignored_dendrites||{})[tp.name] || []);
     const ids = tp.dendrite_ids.map(id=>{
       const on = SEL[tp.name] && SEL[tp.name].has(id);
       const checked = on ? 'checked':'';
+      const isIgnored = ignoredHere.has(id);
       const selCls = on ? ' selected':'';
-      return `<label class="idchip${selCls}" data-tp="${tp.name.replace(/"/g,'&quot;')}" data-id="${id}"
+      const ignCls = isIgnored ? ' ignored' : '';
+      const tag = isIgnored
+        ? `<span class="ignoretag" title="Un-ignore this dendrite" onclick="event.stopPropagation(); unignoreDendrite('${tp.name.replace(/'/g,"\\\\'")}','${id}')">ignored ✕</span>`
+        : '';
+      return `<label class="idchip${selCls}${ignCls}" data-tp="${tp.name.replace(/"/g,'&quot;')}" data-id="${id}"
         onclick="rowPick(event,'${tp.name.replace(/'/g,"\\\\'")}','${id}')">
         <input type="checkbox" ${checked}/>
         <span class="swatch" style="background:${colorForId(id)}"></span>
-        <span>dendrite ${id}</span></label>`;
+        <span>dendrite ${id}</span>${tag}</label>`;
     }).join('');
     col.innerHTML = `
       <div class="chead"><div class="name">${tp.name}</div>
@@ -898,10 +930,26 @@ async function createLink(){
     setStatus('Link created. '+STATE.links.length+' total.');
   }catch(e){ setStatus('Create link failed: '+e.message); }
 }
-async function autoLink(){
-  try{ STATE = await api('/mtp/auto-link-shared',{method:'POST'}); renderLinkHub();
-    setStatus('Auto-linked identical IDs. '+STATE.links.length+' total.'); }
-  catch(e){ setStatus('Auto-link failed: '+e.message); }
+async function ignoreSelectedDendrites(){
+  const pairs = [];
+  Object.keys(SEL).forEach(tp=>{ SEL[tp].forEach(id=>pairs.push([tp,id])); });
+  if(!pairs.length){ setStatus('Select dendrite(s) to ignore first.'); return; }
+  try{
+    for(const [tp,id] of pairs){
+      STATE = await api('/mtp/ignore-dendrite', {method:'POST',headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({timepoint:tp, dendrite_id:id})});
+    }
+    Object.keys(SEL).forEach(k=>SEL[k].clear());
+    renderColumns();
+    setStatus('Ignored '+pairs.length+' dendrite(s). Their spines are excluded from matching.');
+  }catch(e){ setStatus('Ignore failed: '+e.message); }
+}
+async function unignoreDendrite(tp, id){
+  try{
+    STATE = await api('/mtp/ignore-dendrite/'+encodeURIComponent(tp)+'/'+encodeURIComponent(id), {method:'DELETE'});
+    renderColumns();
+    setStatus('Un-ignored dendrite '+id+' at '+tp+'.');
+  }catch(e){ setStatus('Un-ignore failed: '+e.message); }
 }
 async function deleteLink(id){
   try{ STATE = await api('/mtp/link/'+encodeURIComponent(id),{method:'DELETE'}); renderLinkHub(); }
@@ -989,18 +1037,14 @@ function renderTpPick() {
   const el = document.getElementById('tpPick');
   if (!el) return;
   if (!TP_CATALOG.length) { el.innerHTML = ''; return; }
-  const boxes = TP_CATALOG.map(tp => {
-    const dis = tp.has_csv ? '' : ' disabled';
-    const chk = tp.selected && tp.has_csv ? ' checked' : '';
-    const tag = tp.has_csv ? ' ('+tp.spine_count+' spines)' : ' (no CSV)';
-    return '<label style="margin-right:12px;white-space:nowrap"><input type="checkbox" class="tp-chk" value="'+tp.name.replace(/"/g,'')+'"'+dis+chk+'> '+tp.name+tag+'</label>';
-  }).join('');
-  el.innerHTML = '<b>Active timepoints</b> (uncheck to exclude) — '+boxes;
+  const items = TP_CATALOG.filter(tp => tp.selected).map(tp =>
+    '<span style="margin-right:12px;white-space:nowrap">'+tp.name+(tp.has_csv ? ' ('+tp.spine_count+' spines)' : ' (MISSING CSV)')+'</span>'
+  ).join('');
+  el.innerHTML = '<b>Timepoints (from config)</b> — '+items;
 }
 
 function selectedTimepointsQuery() {
-  const names = [...document.querySelectorAll('.tp-chk:checked')].map(el => el.value);
-  return names.join(',');
+  return '';  // timepoints come from config only
 }
 
 async function bootstrapHub(reloadAnimal=true){

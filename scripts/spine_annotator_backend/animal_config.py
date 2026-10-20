@@ -54,33 +54,55 @@ def workflow_pairs_for_timepoints(timepoint_names: List[str]) -> List[tuple[str,
     return pairs
 
 
+def selected_timepoints(cfg: AnimalConfig) -> List[str]:
+    """Timepoints to work on, in config order: active_timepoints, else timepoint_order.
+
+    The same list applies to every FOV of the animal. There is no per-FOV choice.
+    """
+    order = [str(t).strip() for t in cfg.timepoint_order if str(t).strip()]
+    active = [str(t).strip() for t in cfg.active_timepoints if str(t).strip()]
+    if not active:
+        return order
+    unknown = [t for t in active if t not in order]
+    if unknown:
+        raise ValueError(
+            "active_timepoints not in timepoint_order: " + ", ".join(unknown)
+        )
+    return [t for t in order if t in set(active)]
+
+
 def resolve_active_timepoints(
     cfg: AnimalConfig,
     available_with_csv: List[str],
-    *,
-    requested: Optional[List[str]] = None,
-    saved: Optional[List[str]] = None,
 ) -> List[str]:
-    """Pick ordered active TPs: UI request > per-FOV save > config > all available."""
-    order = list(cfg.timepoint_order) or list(available_with_csv)
-    choose = requested or saved or list(cfg.active_timepoints) or None
-    if not choose:
-        out = [t for t in order if t in available_with_csv]
-        for t in available_with_csv:
-            if t not in out:
-                out.append(t)
-        return out
-    choose_set = {str(t).strip() for t in choose if str(t).strip()}
-    out = [t for t in order if t in choose_set and t in available_with_csv]
-    for t in available_with_csv:
-        if t in choose_set and t not in out:
-            out.append(t)
-    if not out:
+    """Selected timepoints (config only); error when one of them has no CSV for this FOV."""
+    selected = selected_timepoints(cfg)
+    missing = [t for t in selected if t not in available_with_csv]
+    if missing:
         raise ValueError(
-            "No selected timepoints have detection CSVs. "
-            f"Available: {', '.join(available_with_csv) or '(none)'}"
+            "Missing detection CSV for timepoint(s): " + ", ".join(missing)
         )
-    return out
+    return selected
+
+
+def missing_animal_files(cfg: AnimalConfig, respan: Path) -> List[str]:
+    """Every missing CSV / TIFF across all configured FOVs and selected timepoints."""
+    from . import animal_layout
+
+    missing: List[str] = []
+    for fov in cfg.fovs or [cfg.default_fov]:
+        for tp in selected_timepoints(cfg):
+            tp_dir = respan / tp
+            if not tp_dir.is_dir():
+                missing.append(f"FOV {fov} · {tp}: folder {tp_dir} not found")
+                continue
+            try:
+                animal_layout.find_spine_csv(respan, tp, fov)
+            except FileNotFoundError:
+                missing.append(f"FOV {fov} · {tp}: detection CSV (Tables/fov{fov}*detected_spines*.csv)")
+            if animal_layout.find_tiff_for_fov(tp_dir, fov) is None:
+                missing.append(f"FOV {fov} · {tp}: TIFF (fov{fov}*.tif)")
+    return missing
 
 
 def _coerce_int(value: object, default: int) -> int:
@@ -168,6 +190,7 @@ def resolve_paths(cfg: AnimalConfig) -> Dict[str, str]:
             "workspace": "",
             "respan_root": "",
             "results_root": "",
+            "results_final_dir": "",
             "default_fov": str(cfg.default_fov),
             "folder_open_depth": str(cfg.folder_open_depth),
             "config_path": cfg.config_path,
@@ -179,7 +202,8 @@ def resolve_paths(cfg: AnimalConfig) -> Dict[str, str]:
             "animal_id": cfg.animal_id,
             "workspace": str(report.workspace),
             "respan_root": str(respan),
-            "results_root": str(respan / "results"),
+            "results_root": "",
+            "results_final_dir": str(respan / "_annotator" / "Results final"),
             "default_fov": str(cfg.default_fov),
             "folder_open_depth": str(cfg.folder_open_depth),
             "config_path": cfg.config_path,
@@ -196,6 +220,7 @@ def resolve_paths(cfg: AnimalConfig) -> Dict[str, str]:
             "workspace": ws,
             "respan_root": "",
             "results_root": "",
+            "results_final_dir": "",
             "error": str(exc),
             "config_path": cfg.config_path,
         }
@@ -211,6 +236,9 @@ def list_newly_created_folders(report: respan_bootstrap.BootstrapReport) -> List
     seen: set[str] = set()
     out: List[Path] = []
     for rel in report.created:
+        parts = Path(rel).parts
+        if parts and parts[0].lower() == "results":
+            continue
         p = (report.respan / rel).resolve()
         if not p.is_dir():
             continue
@@ -253,7 +281,7 @@ def list_folders_to_open(cfg: AnimalConfig, *, max_depth: Optional[int] = None) 
         except OSError:
             return
         for child in children:
-            if child.name.lower() in {"__pycache__", ".git"}:
+            if child.name.lower() in {"__pycache__", ".git", "results"}:
                 continue
             add(child)
             walk(child, level + 1)

@@ -28,6 +28,16 @@ SOURCE_LOCAL_ARTIFACT = "local_artifact"
 SOURCE_LOCAL_NEW = "local_new"
 SOURCE_LOCAL_LOST = "local_lost"
 SOURCE_RETURNED_TO_POOL = "returned_to_pool"
+SOURCE_LOST_INFERRED_PREFIX = "lost_inferred_after_"
+
+# Fates the inference pass writes itself. They are cleared and re-derived on
+# every finalize so a re-saved lineage always follows the current rules.
+_INFERRED_SOURCE_PREFIXES = (
+    SOURCE_LOST_INFERRED_PREFIX,
+    "lost_propagated_after_",
+    "ignore_inferred_after_",
+    "ignore_propagated_after_",
+)
 
 
 def decision_scope(td: dict) -> str:
@@ -109,140 +119,18 @@ def all_other_timepoints_cleared(
 
 
 
-def _is_observed_match(td: dict) -> bool:
-    """Positively matched spine (not inferred / censored)."""
-    if _is_blind_spot(td) or _is_false_positive_mark(td):
-        return False
-    fate = str(td.get("fate") or "").strip().lower()
-    if fate in ("lost", "artifact", "ignore", "bridge"):
-        return False
-    sid = str(td.get("spine_id") or "").strip()
-    if not sid or sid.startswith("bridge_") or sid.startswith("artifact_"):
-        return False
-    src = str(td.get("source") or "").strip().lower()
-    if src in ("false_positive_removed", "bridge_assumed", "false_positive_bridged"):
-        return False
-    return True
-
-
-def strip_bridge_fates(
-    per_tp: Dict[str, dict],
-    timepoint_names: List[str],
-) -> Dict[str, dict]:
-    """Remove legacy bridge labels and synthetic bridge_* IDs."""
-    out = {tp: dict(per_tp.get(tp) or {}) for tp in timepoint_names}
-    for tp in timepoint_names:
-        td = out[tp]
-        fate = str(td.get("fate") or "").strip().lower()
-        sid = str(td.get("spine_id") or "").strip()
-        src = str(td.get("source") or "").strip().lower()
-        if fate != "bridge" and not sid.startswith("bridge_") and not src.startswith("bridge_"):
-            continue
-        td["fate"] = None
-        td["spine_id"] = None
-        td.pop("continuity", None)
-        for key in ("x", "y", "z"):
-            td.pop(key, None)
-        td["source"] = "cleared"
-    return out
-
-
-def _lineage_continuous_present(td: dict) -> bool:
-    """Present for survival / lifespan / event continuity."""
-    return _is_observed_match(td)
-
-
-def remove_false_positive_observations(
-    per_tp: Dict[str, dict],
-    timepoint_names: List[str],
-    *,
-    pre_spine_id: str = "",
-) -> Dict[str, dict]:
-    """Drop a lone false-positive match."""
-    out = {tp: dict(per_tp.get(tp) or {}) for tp in timepoint_names}
-    for i, tp in enumerate(timepoint_names):
-        td = out[tp]
-        if not _is_false_positive_mark(td):
-            continue
-        if not all_other_timepoints_cleared(out, timepoint_names, tp):
-            raise ValueError(
-                f"False-positive tag at '{tp}' requires all other timepoints to be clear "
-                f"(no match, no fate)."
-            )
-        removed = str(td.get("removed_spine_id") or td.get("spine_id") or "").strip()
-        td["removed_spine_id"] = removed
-        td["spine_id"] = None
-        td["artifact_mode"] = ARTIFACT_MODE_FALSE_POSITIVE
-        if _is_false_positive_ignore(td):
-            td["fate"] = "ignore"
-            td["source"] = "false_positive_ignore"
-        else:
-            td["fate"] = "artifact"
-            td["source"] = "false_positive_artifact"
-        td["continuity"] = "broken"
-    return out
-
-
-def _prior_blocks_new_inference(prev: dict) -> bool:
-    """Earlier TP blocks inferred NEW unless the label was local-only."""
-    if _lineage_continuous_present(prev):
-        return True
-    fate = str(prev.get("fate") or "").strip()
-    if not fate:
-        return False
-    return not is_local_decision(prev)
-
-
-def _all_prior_no_match_no_fate(
-    per_tp: Dict[str, dict],
-    timepoint_names: List[str],
-    idx: int,
-) -> bool:
-    """True when every earlier TP has no continuity (NEW eligibility)."""
-    for j in range(idx):
-        prev = per_tp.get(timepoint_names[j]) or {}
-        if _prior_blocks_new_inference(prev):
-            return False
-    return True
-
-
-def infer_new_at_first_match(
-    per_tp: Dict[str, dict],
-    timepoint_names: List[str],
-    *,
-    anchor_timepoint: str = "",
-) -> Dict[str, dict]:
-    """NEW = first match when all earlier TPs are no match, no fate (never at anchor TP)."""
-    out = {tp: dict(per_tp.get(tp) or {}) for tp in timepoint_names}
-    anchor = str(anchor_timepoint or "").strip()
-    for i, tp in enumerate(timepoint_names):
-        if anchor and tp == anchor:
-            continue
-        td = out[tp]
-        if str(td.get("fate") or "").strip():
-            continue
-        if not str(td.get("spine_id") or "").strip():
-            continue
-        if _all_prior_no_match_no_fate(out, timepoint_names, i):
-            td["fate"] = "new"
-            td["source"] = str(td.get("source") or "inferred_new")
-    return out
-
-
 def _tp_is_present(td: dict) -> bool:
     """Spine was matched at this timepoint."""
     if _is_blind_spot(td) or _is_false_positive_mark(td):
         return False
     fate = str(td.get("fate") or "").strip().lower()
-    if fate in ("lost", "artifact", "ignore", "bridge"):
+    if fate in ("lost", "artifact", "ignore"):
         return False
     src = str(td.get("source") or "").strip().lower()
-    if src in ("false_positive_removed", "bridge_unfulfilled", "bridge_assumed"):
+    if src == "false_positive_removed":
         return False
     sid = str(td.get("spine_id") or "").strip()
-    if sid.startswith("bridge_"):
-        return False
-    return bool(sid)
+    return bool(sid) and not sid.startswith("artifact_")
 
 
 def _tp_is_unmarked_gap(td: dict) -> bool:
@@ -255,261 +143,71 @@ def _tp_is_unmarked_gap(td: dict) -> bool:
 
 
 def _tp_is_censored(td: dict) -> bool:
-    """Blind-spot artifact: image quality too poor to observe presence at this TP."""
+    """Blind-spot artifact. Legacy only: a lineage can no longer be censored."""
     return _is_blind_spot(td)
 
 
-def _has_present_match_after(
+_FATE_KEYS = ("fate", "artifact_mode", "decision_scope", "continuity", "fate_locked")
+
+
+def normalize_lineage_input(
     per_tp: Dict[str, dict],
     timepoint_names: List[str],
-    idx: int,
-) -> bool:
-    """Later TP with real match (lineage recovery after artifact)."""
-    for j in range(idx + 1, len(timepoint_names)):
-        if _tp_is_present(per_tp.get(timepoint_names[j]) or {}):
-            return True
-    return False
+) -> Dict[str, dict]:
+    """Reduce a lineage to what the user decides: which spine at which timepoint.
 
-
-def _mark_lost_from_index(
-    out: Dict[str, dict],
-    timepoint_names: List[str],
-    start_i: int,
-    disappeared_after: str,
-) -> None:
-    for j in range(start_i, len(timepoint_names)):
-        tj = timepoint_names[j]
-        tdj = out[tj]
-        if _tp_is_censored(tdj):
-            return
-        if _tp_is_present(tdj):
-            return
-        if _tp_is_unmarked_gap(tdj):
-            tdj["fate"] = "lost"
-            tdj["spine_id"] = None
-            tag = "lost_inferred_after_" if j == start_i else "lost_propagated_after_"
-            tdj["source"] = f"{tag}{disappeared_after}"
-
-
-def _mark_ignore_from_index(
-    out: Dict[str, dict],
-    timepoint_names: List[str],
-    start_i: int,
-    source_after: str,
-) -> None:
-    for j in range(start_i, len(timepoint_names)):
-        tj = timepoint_names[j]
-        tdj = out[tj]
-        if _tp_is_censored(tdj):
-            return
-        if _tp_is_present(tdj):
-            return
-        if _tp_is_unmarked_gap(tdj):
-            tdj["fate"] = "ignore"
-            tdj["spine_id"] = None
-            tag = "ignore_inferred_after_" if j == start_i else "ignore_propagated_after_"
-            tdj["source"] = f"{tag}{source_after}"
-
-
-def _tail_has_censored_or_present(
-    per_tp: Dict[str, dict],
-    timepoint_names: List[str],
-    start_i: int,
-) -> tuple[bool, bool]:
-    """From start_i onward: any censored TP, and any present match."""
-    censored = False
-    present = False
-    for j in range(start_i, len(timepoint_names)):
-        td = per_tp.get(timepoint_names[j]) or {}
-        if _tp_is_censored(td):
-            censored = True
-        if _tp_is_present(td):
-            present = True
-    return censored, present
-
-
-def _shift_stack_coords(
-    x: float,
-    y: float,
-    src_tp: str,
-    dst_tp: str,
-    *,
-    pre_tp: str,
-    shifts: Dict[str, Tuple[float, float, float]],
-) -> Tuple[float, float]:
-    sx_s, sy_s, _ = shifts.get(src_tp, (0.0, 0.0, 0.0))
-    sx_d, sy_d, _ = shifts.get(dst_tp, (0.0, 0.0, 0.0))
-    if src_tp != pre_tp:
-        x, y = x - sx_s, y - sy_s
-    if dst_tp != pre_tp:
-        x, y = x + sx_d, y + sy_d
-    return x, y
-
-
-def _gap_should_infer_ignore(
-    tp: str,
-    last_seen_td: dict,
-    *,
-    last_seen_tp: str,
-    pre_tp: str,
-    oof_segments: Optional[List[dict]],
-    ignored_by_tp: Optional[Dict[str, set]],
-    shifts: Optional[Dict[str, Tuple[float, float, float]]],
-) -> bool:
-    """Empty gap after a match → IGNORE when track falls in OOF / ignored region."""
-    if str(last_seen_td.get("fate") or "").strip().lower() == "ignore":
-        return True
-    lx = last_seen_td.get("x")
-    ly = last_seen_td.get("y")
-    if lx is not None and ly is not None and oof_segments:
-        from . import oof_segment_store
-
-        x, y = _shift_stack_coords(
-            float(lx),
-            float(ly),
-            last_seen_tp,
-            tp,
-            pre_tp=pre_tp,
-            shifts=shifts or {},
-        )
-        if oof_segment_store.coords_in_oof(x, y, tp, oof_segments):
-            return True
-    if ignored_by_tp and ignored_by_tp.get(tp):
-        if lx is not None and ly is not None and oof_segments:
-            return False
-        return True
-    return False
-
-
-def infer_lost_after_last_match(
-    per_tp: Dict[str, dict],
-    timepoint_names: List[str],
-    *,
-    pre_tp: str = "",
-    oof_segments: Optional[List[dict]] = None,
-    ignored_by_tp: Optional[Dict[str, set]] = None,
-    shifts: Optional[Dict[str, Tuple[float, float, float]]] = None,
-) -> tuple[Dict[str, dict], str, str, str, bool]:
-    """Infer LOST or IGNORE when later TPs have no match and no fate.
-
-    IGNORE (not LOST) when the gap falls in an OOF / ignored region (FOV edge).
-    Blind-spot ARTIFACT (clear + artifact) is censored and never inferred as LOST.
-
-    Summary fields returned:
-    - last_seen_tp: last timepoint with observed presence
-    - disappeared_at_tp: first timepoint classified as LOST (empty if not lost)
-    - censored_from_tp: first censored / OOF-ignore timepoint (empty if fully tracked)
+    Rules review 2026-10 (docs/RULES_REVIEW_2026-10.md, decision 29): a lineage
+    ends only MATCHED or LOST -> ABSENT. ARTIFACT / IGNORE are Timepoint-mode
+    tags on one detection, never lineage fates. So every stored fate (NEW, LOST,
+    IGNORE, ARTIFACT, blind-spot censoring), Timepoint-mode local decision and
+    false-positive mark is dropped here; NEW and LOST are re-inferred after.
     """
-    out = {tp: dict(per_tp.get(tp) or {}) for tp in timepoint_names}
-    last_seen_tp = ""
-    disappeared_at_tp = ""
-    censored_from_tp = ""
-    right_censored = False
-    anchor_pre = str(pre_tp or (timepoint_names[0] if timepoint_names else ""))
+    out: Dict[str, dict] = {}
+    for tp in timepoint_names:
+        td = dict(per_tp.get(tp) or {})
+        sid = str(td.get("spine_id") or "").strip()
+        if _is_false_positive_mark(td) or sid.startswith("artifact_"):
+            sid = ""
+        for key in _FATE_KEYS:
+            td.pop(key, None)
+        td["fate"] = None
+        if not sid:
+            td["spine_id"] = None
+            src = str(td.get("source") or "").strip().lower()
+            if src.startswith(_INFERRED_SOURCE_PREFIXES) or src.startswith("false_positive_"):
+                td["source"] = "cleared"
+        out[tp] = td
+    return out
 
-    for i, tp in enumerate(timepoint_names):
-        td = out[tp]
-        fate = str(td.get("fate") or "").strip().lower()
 
-        if is_local_decision(td):
-            if fate == "artifact" or _is_blind_spot(td):
-                if not censored_from_tp:
-                    censored_from_tp = tp
-                td.setdefault("artifact_mode", ARTIFACT_MODE_BLIND_SPOT)
-            elif _tp_is_present(td):
-                last_seen_tp = tp
-            else:
-                # Timepoint-mode local fate (L/I/A/N): this TP only — never infer lineage LOST/IGNORE after it.
-                last_seen_tp = ""
-            continue
+def _present_flags(per_tp: Dict[str, dict], timepoint_names: List[str]) -> List[bool]:
+    return [_tp_is_present(per_tp.get(tp) or {}) for tp in timepoint_names]
 
-        if fate == "lost" and not _tp_is_present(td):
-            if not disappeared_at_tp:
-                disappeared_at_tp = tp
-            _mark_lost_from_index(
-                out,
-                timepoint_names,
-                i + 1,
-                last_seen_tp,
+
+def validate_lineage_shape(
+    per_tp: Dict[str, dict],
+    timepoint_names: List[str],
+) -> Optional[str]:
+    """Return an error string when the matched timepoints are not one block.
+
+    Run on normalize_lineage_input() output, so the only thing left to check is
+    that a lineage is never split: no gap between two matched timepoints.
+    (Fates are inferred, so "only ABSENT before NEW / after LOST" holds by
+    construction.)
+    """
+    present = _present_flags(per_tp, timepoint_names)
+    if not any(present):
+        return None
+    first = present.index(True)
+    last = len(present) - 1 - present[::-1].index(True)
+    for i in range(first, last + 1):
+        if not present[i]:
+            return (
+                f"Lineage cannot be split: matched at {timepoint_names[first]} and "
+                f"{timepoint_names[last]} but not at {timepoint_names[i]}. "
+                "Matched timepoints must form one continuous block."
             )
-            break
-
-        if fate == "ignore" and not _tp_is_present(td) and not _is_false_positive_mark(td):
-            if not censored_from_tp:
-                censored_from_tp = tp
-            _mark_ignore_from_index(
-                out,
-                timepoint_names,
-                i + 1,
-                last_seen_tp,
-            )
-            break
-
-        if _tp_is_censored(td):
-            if not censored_from_tp:
-                censored_from_tp = tp
-                td.setdefault("artifact_mode", ARTIFACT_MODE_BLIND_SPOT)
-                td["source"] = str(td.get("source") or "blind_spot_censored")
-            tail_censored, tail_present = _tail_has_censored_or_present(out, timepoint_names, i)
-            if last_seen_tp and tail_censored and not tail_present:
-                right_censored = True
-            continue
-
-        if _tp_is_present(td):
-            last_seen_tp = tp
-            continue
-
-        if not last_seen_tp:
-            continue
-
-        if _tp_is_unmarked_gap(td):
-            last_i = timepoint_names.index(last_seen_tp)
-            has_censored_after = any(
-                _tp_is_censored(out.get(timepoint_names[k]) or {})
-                for k in range(last_i + 1, len(timepoint_names))
-            )
-            if has_censored_after:
-                present_after_last = any(
-                    _tp_is_present(out.get(timepoint_names[k]) or {})
-                    for k in range(last_i + 1, len(timepoint_names))
-                )
-                if not present_after_last:
-                    if not censored_from_tp:
-                        for k in range(last_i + 1, len(timepoint_names)):
-                            if _tp_is_censored(out.get(timepoint_names[k]) or {}):
-                                censored_from_tp = timepoint_names[k]
-                                break
-                    right_censored = all(
-                        _tp_is_censored(out.get(timepoint_names[k]) or {})
-                        or _tp_is_unmarked_gap(out.get(timepoint_names[k]) or {})
-                        for k in range(last_i + 1, len(timepoint_names))
-                    ) and _tp_is_censored(out.get(timepoint_names[-1]) or {})
-                    break
-            last_seen_td = out.get(last_seen_tp) or {}
-            if _gap_should_infer_ignore(
-                tp,
-                last_seen_td,
-                last_seen_tp=last_seen_tp,
-                pre_tp=anchor_pre,
-                oof_segments=oof_segments,
-                ignored_by_tp=ignored_by_tp,
-                shifts=shifts,
-            ):
-                if not censored_from_tp:
-                    censored_from_tp = tp
-                td["fate"] = "ignore"
-                td["spine_id"] = None
-                td["source"] = f"ignore_inferred_after_{last_seen_tp}"
-                _mark_ignore_from_index(out, timepoint_names, i + 1, last_seen_tp)
-                break
-            # Lineage ends at last_seen_tp (last visible); gap TPs return to pool — no lost fate on later TPs.
-            disappeared_at_tp = last_seen_tp
-            break
-
-    if right_censored:
-        disappeared_at_tp = ""
-
-    return out, last_seen_tp, disappeared_at_tp, censored_from_tp, right_censored
+    return None
 
 
 def _release_tp_to_pool(td: dict) -> dict:
@@ -520,82 +218,77 @@ def _release_tp_to_pool(td: dict) -> dict:
         out["removed_spine_id"] = sid
     out["spine_id"] = None
     out["fate"] = None
-    out["artifact_mode"] = None
-    out.pop("decision_scope", None)
     out.pop("continuity", None)
     out["source"] = SOURCE_RETURNED_TO_POOL
     return out
 
 
-def _first_new_index(out: Dict[str, dict], timepoint_names: List[str]) -> Optional[int]:
-    for i, tp in enumerate(timepoint_names):
-        if str((out.get(tp) or {}).get("fate") or "").strip().lower() == "new":
-            return i
-    return None
-
-
-def _last_present_index(out: Dict[str, dict], timepoint_names: List[str]) -> int:
-    last_i = -1
-    for i, tp in enumerate(timepoint_names):
-        td = out.get(tp) or {}
-        if is_local_decision(td) and str(td.get("fate") or "").strip():
-            return i
-        if _tp_is_unmarked_gap(td):
-            if last_i >= 0:
-                break
-            continue
-        if str(td.get("fate") or "").strip().lower() == "lost":
-            break
-        if _tp_is_present(td):
-            last_i = i
-    return last_i
-
-
-def release_unbound_matches(
+def _keep_one_block(
     per_tp: Dict[str, dict],
     timepoint_names: List[str],
+    *,
+    anchor_timepoint: str = "",
 ) -> Dict[str, dict]:
-    """Return stale auto-matches to the pool outside this lineage's span.
+    """Keep one continuous block of matches; release the rest to the pool.
 
-    - S-mode local fate (I/A/N/L): lineage exists at that TP only.
-    - NEW at TPk: earlier TP matches are released.
-    - LOST after last seen: later TP matches are released (even if algorithm-filled).
+    Saves are validated, so this only acts on lineages that were not: a
+    duplicate-conflict resolution that removed a middle spine, or legacy data.
+    The block holding the anchor timepoint wins, else the first block.
     """
     out = {tp: dict(per_tp.get(tp) or {}) for tp in timepoint_names}
-
-    for i, tp in enumerate(timepoint_names):
-        td = out[tp]
-        if is_local_decision(td) and str(td.get("fate") or "").strip():
-            for j, tp2 in enumerate(timepoint_names):
-                if j != i:
-                    out[tp2] = _release_tp_to_pool(out[tp2])
-            return out
-
-    new_i = _first_new_index(out, timepoint_names)
-    if new_i is not None:
-        for j in range(new_i):
-            out[timepoint_names[j]] = _release_tp_to_pool(out[timepoint_names[j]])
-        end_i = new_i
-        for j in range(new_i, len(timepoint_names)):
-            td = out[timepoint_names[j]]
-            if _tp_is_present(td):
-                end_i = j
-            elif str(td.get("fate") or "").strip().lower() in ("lost", "ignore", "artifact"):
-                break
-            elif _tp_is_unmarked_gap(td):
-                break
-        for j in range(end_i + 1, len(timepoint_names)):
-            out[timepoint_names[j]] = _release_tp_to_pool(out[timepoint_names[j]])
+    present = _present_flags(out, timepoint_names)
+    blocks: List[Tuple[int, int]] = []
+    i = 0
+    while i < len(present):
+        if present[i]:
+            j = i
+            while j + 1 < len(present) and present[j + 1]:
+                j += 1
+            blocks.append((i, j))
+            i = j + 1
+        else:
+            i += 1
+    if len(blocks) <= 1:
         return out
-
-    last_present = _last_present_index(out, timepoint_names)
-    if last_present >= 0:
-        for j in range(last_present + 1, len(timepoint_names)):
-            td = out[timepoint_names[j]]
-            if str(td.get("spine_id") or "").strip():
-                out[timepoint_names[j]] = _release_tp_to_pool(td)
-
+    keep = blocks[0]
+    if anchor_timepoint in timepoint_names:
+        a = timepoint_names.index(anchor_timepoint)
+        keep = next((b for b in blocks if b[0] <= a <= b[1]), keep)
+    for k, tp in enumerate(timepoint_names):
+        if present[k] and not keep[0] <= k <= keep[1]:
+            out[tp] = _release_tp_to_pool(out[tp])
     return out
+
+
+def _infer_new_and_lost(
+    per_tp: Dict[str, dict],
+    timepoint_names: List[str],
+) -> Tuple[Dict[str, dict], str, str]:
+    """NEW at the first match (unless it is the first session timepoint); LOST at
+    the first timepoint after the last match (unless that was the last one).
+    Everything else outside the block stays empty = ABSENT.
+
+    Returns (per_tp, last_seen_tp, disappeared_at_tp).
+    """
+    out = {tp: dict(per_tp.get(tp) or {}) for tp in timepoint_names}
+    present = _present_flags(out, timepoint_names)
+    if not any(present):
+        return out, "", ""
+    first = present.index(True)
+    last = len(present) - 1 - present[::-1].index(True)
+    if first > 0:
+        td = out[timepoint_names[first]]
+        td["fate"] = "new"
+        td["source"] = str(td.get("source") or "inferred_new")
+    disappeared_at = ""
+    if last + 1 < len(timepoint_names):
+        tp = timepoint_names[last + 1]
+        td = out[tp]
+        td["fate"] = "lost"
+        td["spine_id"] = None
+        td["source"] = f"{SOURCE_LOST_INFERRED_PREFIX}{timepoint_names[last]}"
+        disappeared_at = tp
+    return out, timepoint_names[last], disappeared_at
 
 
 def _finalize_lineage_per_tp(
@@ -609,33 +302,19 @@ def _finalize_lineage_per_tp(
     ignored_by_tp: Optional[Dict[str, set]] = None,
     shifts: Optional[Dict[str, Tuple[float, float, float]]] = None,
 ) -> tuple[Dict[str, dict], str, str, str, bool]:
-    without_fp = remove_false_positive_observations(
-        per_tp, timepoint_names, pre_spine_id=pre_spine_id
+    """normalize -> keep one block -> infer NEW / LOST.
+
+    Returns (per_tp, last_seen_tp, disappeared_at_tp, censored_from_tp,
+    right_censored); the last two are always empty / False now (no lineage
+    censoring). oof_segments / ignored_by_tp / shifts / pre_spine_id are
+    accepted for call-site compatibility and not used.
+    """
+    normalized = normalize_lineage_input(per_tp, timepoint_names)
+    one_block = _keep_one_block(
+        normalized, timepoint_names, anchor_timepoint=anchor_timepoint or pre_tp
     )
-    without_bridge = strip_bridge_fates(without_fp, timepoint_names)
-    with_new = infer_new_at_first_match(
-        without_bridge, timepoint_names, anchor_timepoint=anchor_timepoint
-    )
-    trimmed = release_unbound_matches(with_new, timepoint_names)
-    finalized, _infer_last, disappeared_at_tp, censored_from_tp, right_censored = (
-        infer_lost_after_last_match(
-            trimmed,
-            timepoint_names,
-            pre_tp=pre_tp or anchor_timepoint,
-            oof_segments=oof_segments,
-            ignored_by_tp=ignored_by_tp,
-            shifts=shifts,
-        )
-    )
-    released = release_unbound_matches(finalized, timepoint_names)
-    first_seen_tp, last_seen_tp, censored_from, rc_summary = _derive_lineage_summary(
-        released, timepoint_names
-    )
-    if rc_summary:
-        right_censored = rc_summary
-    if censored_from and not censored_from_tp:
-        censored_from_tp = censored_from
-    return released, last_seen_tp, disappeared_at_tp, censored_from_tp, right_censored
+    finalized, last_seen_tp, disappeared_at_tp = _infer_new_and_lost(one_block, timepoint_names)
+    return finalized, last_seen_tp, disappeared_at_tp, "", False
 
 
 def _meta_dir(respan: Path, fov: int) -> Path:
@@ -656,7 +335,37 @@ def load_decisions(respan: Path, fov: int) -> dict:
     p = paths(respan, fov)["decisions"]
     if not p.is_file():
         return {"animal_id": "", "fov": str(fov), "lineages": []}
-    return json.loads(p.read_text(encoding="utf-8"))
+    data = json.loads(p.read_text(encoding="utf-8"))
+    data["lineages"] = [_apply_current_rules(lin) for lin in data.get("lineages") or []]
+    return data
+
+
+def _apply_current_rules(lin: dict) -> dict:
+    """Re-derive a stored lineage under the current rules (in memory).
+
+    Legacy lineages may carry fates the rules no longer allow (IGNORE / ARTIFACT /
+    censored at lineage level, LOST on every trailing timepoint, a split block).
+    Every reader sees the same normalized lineage; the file is rewritten in this
+    shape on the next save.
+    """
+    per_tp = dict(lin.get("per_tp") or {})
+    tps = list(lin.get("timepoint_names") or per_tp.keys())
+    if not tps:
+        return lin
+    finalized, last_seen, _, _, _ = _finalize_lineage_per_tp(
+        per_tp,
+        tps,
+        pre_spine_id=str(lin.get("pre_spine_id") or ""),
+        anchor_timepoint=str(lin.get("pre_timepoint") or ""),
+    )
+    first_seen, _, _, _ = _derive_lineage_summary(finalized, tps)
+    out = dict(lin)
+    out["per_tp"] = {tp: dict(finalized.get(tp) or {}) for tp in tps}
+    out["first_seen_tp"] = first_seen
+    out["last_seen_tp"] = last_seen
+    for stale in ("censored_from_tp", "right_censored", "ignore_after_tp"):
+        out.pop(stale, None)
+    return out
 
 
 def get_lineage_by_key(respan: Path, fov: int, lineage_key: str) -> Optional[dict]:
@@ -720,7 +429,14 @@ def save_decision(
     lineages: List[dict] = list(data.get("lineages") or [])
     key = str(lineage_key or pre_spine_id).strip()
     local_anchor = str(pre_spine_id).strip()
-    finalized, last_seen_tp, disappeared_at_tp, censored_from_tp, right_censored = (
+    # Validate what the user submitted, before _keep_one_block() can silently
+    # drop a match after a gap.
+    shape_error = validate_lineage_shape(
+        normalize_lineage_input(per_tp, timepoint_names), timepoint_names
+    )
+    if shape_error:
+        raise ValueError(shape_error)
+    finalized, last_seen_tp, disappeared_at_tp, _, _ = (
         _finalize_lineage_per_tp(
         per_tp,
         timepoint_names,
@@ -732,7 +448,37 @@ def save_decision(
         shifts=shifts,
     )
     )
+
     first_seen_tp, _, _, _ = _derive_lineage_summary(finalized, timepoint_names)
+
+    # Check if lineage is empty (all TPs clear + no faith)
+    has_any_match = any(
+        str(finalized.get(tp, {}).get("spine_id") or "").strip()
+        for tp in timepoint_names
+    )
+
+    deleted = False
+    if not has_any_match:
+        # Empty lineage: delete it and return spines to pool
+        for i, row in enumerate(lineages):
+            row_key = str(row.get("lineage_key") or row.get("pre_spine_id") or "").strip()
+            if row_key == key:
+                lineages.pop(i)
+                deleted = True
+                break
+        data["lineages"] = lineages
+        meta["decisions"].write_text(json.dumps(data, indent=2), encoding="utf-8")
+        return {
+            "path": str(meta["decisions"]),
+            "registry_path": "",
+            "disposition_path": "",
+            "coverage": {},
+            "first_seen_tp": "",
+            "last_seen_tp": "",
+            "lost_inferred": False,
+            "deleted": True,
+        }
+
     entry = {
         "lineage_key": key,
         "pre_spine_id": local_anchor,
@@ -740,8 +486,6 @@ def save_decision(
         "timepoint_names": list(timepoint_names),
         "first_seen_tp": first_seen_tp,
         "last_seen_tp": last_seen_tp,
-        "censored_from_tp": censored_from_tp,
-        "right_censored": right_censored,
         "per_tp": {tp: dict(finalized.get(tp) or {}) for tp in timepoint_names},
     }
     replaced = False
@@ -779,9 +523,166 @@ def save_decision(
         "first_seen_tp": first_seen_tp,
         "last_seen_tp": last_seen_tp,
         "lost_inferred": bool(disappeared_at_tp),
-        "censored_from_tp": censored_from_tp,
-        "right_censored": right_censored,
+        "deleted": False,
     }
+
+
+def apply_undo_snapshot(
+    respan: Path,
+    fov: int,
+    stash: dict,
+    *,
+    timepoint_names: Optional[List[str]] = None,
+    ignored_by_tp: Optional[Dict[str, set]] = None,
+) -> dict:
+    """Reverse the most recent save_decision() call using a pre-save stash
+    captured by the caller right before that call (see
+    mtp_spine_viewer.confirm_lineage). Restores the lineage's exact prior
+    state (or removes it if it was newly created), and rolls reviewed_ids /
+    phase_index back to their pre-save values. Single-use: the caller is
+    responsible for clearing its stash after calling this.
+    """
+    key = str(stash.get("lineage_key") or "").strip()
+    if not key:
+        return {"ok": False, "message": "Nothing to undo."}
+
+    meta = paths(respan, fov)
+    data = load_decisions(respan, fov)
+    lineages: List[dict] = [
+        row
+        for row in (data.get("lineages") or [])
+        if str(row.get("lineage_key") or row.get("pre_spine_id") or "").strip() != key
+    ]
+    prior_entry = stash.get("prior_entry")
+    if prior_entry:
+        lineages.append(prior_entry)
+    data["lineages"] = lineages
+    data["updated_at"] = datetime.now(timezone.utc).isoformat()
+    meta["dir"].mkdir(parents=True, exist_ok=True)
+    meta["decisions"].write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    animal_id = str(data.get("animal_id") or "")
+    registry_path = rebuild_registry_wide(respan, fov, animal_id=animal_id)
+    disposition_path = ""
+    coverage: dict = {}
+    try:
+        from . import spine_qc_store
+
+        disp, coverage = spine_qc_store.rebuild_spine_disposition(
+            respan,
+            fov,
+            animal_id=animal_id,
+            timepoint_names=timepoint_names,
+            ignored_by_tp=ignored_by_tp,
+        )
+        disposition_path = str(disp)
+    except Exception:
+        pass
+
+    reviewed_id = str(stash.get("reviewed_id") or "")
+    prog = load_progress(respan, fov)
+    ids = list(prog.get("reviewed_ids") or [])
+    if not stash.get("was_already_reviewed") and reviewed_id in ids:
+        ids.remove(reviewed_id)
+    phase_index = int(stash.get("phase_index", prog.get("phase_index", 0)) or 0)
+    anchor_timepoint = str(stash.get("anchor_timepoint") or prog.get("anchor_timepoint") or "")
+    save_progress(
+        respan,
+        fov,
+        index=int(prog.get("last_pre_spine_index", 0) or 0),
+        reviewed_ids=ids,
+        phase_index=phase_index,
+        anchor_timepoint=anchor_timepoint,
+    )
+
+    return {
+        "ok": True,
+        "lineage_key": key,
+        "spine_id": reviewed_id,
+        "phase_index": phase_index,
+        "anchor_timepoint": anchor_timepoint,
+        "registry_path": str(registry_path),
+        "disposition_path": disposition_path,
+        "coverage": coverage,
+        "restored": bool(prior_entry),
+        "message": (
+            f"Restored prior state of {key}."
+            if prior_entry
+            else f"Removed {key} (was a new lineage) — back to unreviewed."
+        ),
+    }
+
+
+def delete_lineages_claiming(
+    respan: Path,
+    fov: int,
+    timepoint: str,
+    spine_ids: set,
+) -> List[dict]:
+    """Delete every saved lineage that actively claims one of spine_ids at
+    timepoint (a matched spine_id there, or its anchor spine when timepoint is
+    the lineage's own pre_timepoint). The lineage's other timepoints are NOT
+    kept: they return to the unmatched pool. Reviewed marks for the deleted
+    lineages are dropped too, so their anchors re-enter the queue.
+
+    Returns the deleted lineage entries (for undo); empty if none matched.
+    """
+    wanted = {str(x).strip() for x in spine_ids if str(x).strip()}
+    if not wanted:
+        return []
+    data = load_decisions(respan, fov)
+    kept: List[dict] = []
+    removed: List[dict] = []
+    for lin in data.get("lineages") or []:
+        if _lineage_claim_ids_at_tp(lin, timepoint) & wanted:
+            removed.append(lin)
+        else:
+            kept.append(lin)
+    if not removed:
+        return []
+    _write_lineages_and_rebuild(respan, fov, data, kept)
+    gone_keys = {
+        str(lin.get("lineage_key") or lin.get("pre_spine_id") or "").strip()
+        for lin in removed
+    }
+    prog = load_progress(respan, fov)
+    ids = [x for x in (prog.get("reviewed_ids") or []) if str(x) not in gone_keys]
+    save_progress(
+        respan,
+        fov,
+        index=int(prog.get("last_pre_spine_index", 0) or 0),
+        reviewed_ids=ids,
+        phase_index=int(prog.get("phase_index", 0) or 0),
+        anchor_timepoint=str(prog.get("anchor_timepoint") or ""),
+    )
+    return removed
+
+
+def restore_lineages(respan: Path, fov: int, entries: List[dict]) -> None:
+    """Put back lineage entries previously returned by delete_lineages_claiming."""
+    if not entries:
+        return
+    data = load_decisions(respan, fov)
+    restore_keys = {
+        str(e.get("lineage_key") or e.get("pre_spine_id") or "").strip() for e in entries
+    }
+    kept = [
+        lin
+        for lin in (data.get("lineages") or [])
+        if str(lin.get("lineage_key") or lin.get("pre_spine_id") or "").strip()
+        not in restore_keys
+    ]
+    kept.extend(entries)
+    _write_lineages_and_rebuild(respan, fov, data, kept)
+
+
+def _write_lineages_and_rebuild(respan: Path, fov: int, data: dict, lineages: List[dict]) -> None:
+    meta = paths(respan, fov)
+    data["lineages"] = lineages
+    data["updated_at"] = datetime.now(timezone.utc).isoformat()
+    meta["dir"].mkdir(parents=True, exist_ok=True)
+    meta["decisions"].write_text(json.dumps(data, indent=2), encoding="utf-8")
+    rebuild_registry_wide(respan, fov, animal_id=str(data.get("animal_id") or ""))
 
 
 def _status_for_tp(tp_data: dict) -> str:
@@ -803,111 +704,6 @@ def _status_for_tp(tp_data: dict) -> str:
             return "manual"
         return "matched"
     return "absent"
-
-
-def _event_present_state(td: dict) -> bool:
-    """Observed match for strict event anchoring."""
-    return _is_observed_match(td)
-
-
-def _event_continuous_state(td: dict) -> bool:
-    """Continuous lineage presence for survival / lifespan."""
-    return _lineage_continuous_present(td)
-
-
-def _event_clear_state(td: dict) -> bool:
-    """Clear for event inference: unmarked gap only (censored blind spots are not clear)."""
-    return _tp_is_unmarked_gap(td)
-
-
-def _tp_is_absent_tail(td: dict) -> bool:
-    """Absent after last continuous observation (clear or inferred lost)."""
-    if _tp_is_censored(td) or _lineage_continuous_present(td):
-        return False
-    fate = str(td.get("fate") or "").strip().lower()
-    if fate == "lost" and is_local_decision(td):
-        return False
-    return _tp_is_unmarked_gap(td) or fate == "lost"
-
-
-def _derive_events_and_lifecycle(
-    timepoint_names: List[str],
-    per_tp: Dict[str, dict],
-) -> tuple[Dict[str, str], str, str, str]:
-    """Derive formation/loss events and lineage lifecycle from per-timepoint states."""
-    events: Dict[str, str] = {tp: "" for tp in timepoint_names}
-    if not timepoint_names:
-        return events, "", "", "unclassified"
-
-    continuous = [_event_continuous_state(per_tp.get(tp) or {}) for tp in timepoint_names]
-    observed = [_event_present_state(per_tp.get(tp) or {}) for tp in timepoint_names]
-    clear = [_event_clear_state(per_tp.get(tp) or {}) for tp in timepoint_names]
-    censored = [_tp_is_censored(per_tp.get(tp) or {}) for tp in timepoint_names]
-
-    formation_idx: Optional[int] = None
-    for i in range(1, len(timepoint_names)):
-        if observed[i] and not continuous[i - 1] and clear[i - 1]:
-            formation_idx = i
-            break
-    formation_tp = timepoint_names[formation_idx] if formation_idx is not None else ""
-    if formation_tp:
-        prior = events.get(formation_tp, "")
-        events[formation_tp] = (
-            f"{prior};appeared_at_{formation_tp}" if prior else f"appeared_at_{formation_tp}"
-        )
-
-    termination_idx: Optional[int] = None
-    for y in range(len(timepoint_names) - 1):
-        if not continuous[y]:
-            continue
-        if all(
-            _tp_is_absent_tail(per_tp.get(timepoint_names[k]) or {})
-            for k in range(y + 1, len(timepoint_names))
-        ):
-            if any(censored[k] for k in range(y + 1, len(timepoint_names))):
-                continue
-            termination_idx = y
-    termination_tp = timepoint_names[termination_idx] if termination_idx is not None else ""
-    if termination_tp:
-        current = events.get(termination_tp, "")
-        events[termination_tp] = (
-            f"{current};lost_at_{termination_tp}" if current else f"lost_at_{termination_tp}"
-        )
-
-    if all(continuous):
-        lifecycle = "stable"
-    elif any(censored) and termination_idx is None:
-        lifecycle = "right_censored" if censored[-1] else "censored_interval"
-    else:
-        is_transient = (
-            formation_idx is not None
-            and termination_idx is not None
-            and formation_idx <= termination_idx
-            and (termination_idx - formation_idx + 1) < len(timepoint_names)
-        )
-        if is_transient:
-            lifecycle = "transient"
-        elif formation_idx is not None or termination_idx is not None:
-            lifecycle = "persistent_engram"
-        else:
-            lifecycle = "unclassified"
-    return events, formation_tp, termination_tp, lifecycle
-
-
-def _fate_for_tp(tp_data: dict) -> str:
-    src = str(tp_data.get("source") or "").strip().lower()
-    if src == "false_positive_artifact":
-        return "false_positive_artifact"
-    if src == "false_positive_ignore":
-        return "false_positive_ignore"
-    if src in ("false_positive_removed",):
-        return "false_positive_artifact"
-    fate = str(tp_data.get("fate") or "").strip().lower()
-    if fate:
-        return fate
-    if src == "blind_spot_artifact":
-        return "artifact"
-    return ""
 
 
 def _ordered_union_timepoints(lineages: List[dict]) -> List[str]:
@@ -937,72 +733,30 @@ def _derive_lineage_summary(
     per_tp: Dict[str, dict],
     timepoint_names: List[str],
 ) -> tuple[str, str, str, bool]:
-    """Derive first_seen_tp, last_seen_tp, censored_from_tp, right_censored from per_tp."""
-    first_seen = ""
-    last_i = _last_present_index(per_tp, timepoint_names)
-    last_seen = timepoint_names[last_i] if last_i >= 0 else ""
-    for i in range(last_i + 1):
-        tp = timepoint_names[i]
-        if _tp_is_present(per_tp.get(tp) or {}):
-            if not first_seen:
-                first_seen = tp
+    """Derive first_seen_tp, last_seen_tp from per_tp.
 
-    disappeared_at = ""
-    censored_from = ""
-    for tp in timepoint_names:
-        td = per_tp.get(tp) or {}
-        fate = str(td.get("fate") or "").strip().lower()
-        if fate == "lost" and not disappeared_at:
-            disappeared_at = tp
-        if _tp_is_censored(td) and not censored_from:
-            censored_from = tp
-        elif fate == "ignore" and not _is_false_positive_mark(td) and not censored_from:
-            censored_from = tp
-
-    right_censored = False
-    if last_seen and censored_from and not disappeared_at:
-        try:
-            last_i = timepoint_names.index(last_seen)
-            cf_i = timepoint_names.index(censored_from)
-        except ValueError:
-            last_i = cf_i = -1
-        if cf_i > last_i:
-            tail = timepoint_names[cf_i:]
-            if tail and all(
-                _tp_is_censored(per_tp.get(t) or {})
-                or _tp_is_unmarked_gap(per_tp.get(t) or {})
-                or str((per_tp.get(t) or {}).get("fate") or "").lower() == "ignore"
-                for t in tail
-            ):
-                if _tp_is_censored(per_tp.get(tail[-1]) or {}):
-                    right_censored = True
-
-    return first_seen, last_seen, censored_from, right_censored
+    censored_from_tp / right_censored are always empty / False: a lineage can no
+    longer be censored (rules review decision 29).
+    """
+    present = _present_flags(per_tp, timepoint_names)
+    if not any(present):
+        return "", "", "", False
+    first = present.index(True)
+    last = len(present) - 1 - present[::-1].index(True)
+    return timepoint_names[first], timepoint_names[last], "", False
 
 
-def _lineage_summary_fields(lineage: dict, per_tp: Dict[str, dict], timepoint_names: List[str]) -> tuple[str, str, str, bool]:
-    """Prefer recomputed summary; fall back to stored fields for legacy JSON."""
-    first_seen, last_seen, censored_from, right_censored = _derive_lineage_summary(
-        per_tp, timepoint_names
-    )
-    if not first_seen:
-        first_seen = str(lineage.get("first_seen_tp", "") or "")
-    if not last_seen:
-        last_seen = str(lineage.get("last_seen_tp", "") or "")
-    if not censored_from:
-        censored_from = str(lineage.get("censored_from_tp", "") or "")
-        if not censored_from and lineage.get("ignore_after_tp"):
-            anchor = str(lineage.get("ignore_after_tp") or "")
-            if anchor in timepoint_names:
-                anchor_i = timepoint_names.index(anchor)
-                if anchor_i + 1 < len(timepoint_names):
-                    censored_from = timepoint_names[anchor_i + 1]
-    if not right_censored:
-        right_censored = bool(lineage.get("right_censored"))
-    return first_seen, last_seen, censored_from, right_censored
+def _lineage_summary_fields(lineage: dict, per_tp: Dict[str, dict], timepoint_names: List[str]) -> tuple[str, str]:
+    """first_seen_tp / last_seen_tp, recomputed from per_tp."""
+    first_seen, last_seen, _, _ = _derive_lineage_summary(per_tp, timepoint_names)
+    return first_seen, last_seen
 
 
 def _registry_header(timepoint_names: List[str]) -> List[str]:
+    # One status column per timepoint (matched / new / lost / absent); x/y/z
+    # only where a spine was observed. Morphology per observation lives in
+    # spine_observations_long.csv. Interpretation (events, lifecycle) belongs
+    # to the analysis, not this file (outputs review 2026-10).
     header = [
         "animal_id",
         "fov",
@@ -1010,23 +764,15 @@ def _registry_header(timepoint_names: List[str]) -> List[str]:
         "lineage_key",
         "pre_spine_id",
         "anchor_timepoint",
-        "active_timepoints",
         "first_seen_tp",
         "last_seen_tp",
-        "censored_from_tp",
-        "formation_tp",
-        "lifecycle",
-        "right_censored",
     ]
     header += [f"id_{tp}" for tp in timepoint_names]
     header += [f"local_id_{tp}" for tp in timepoint_names]
     header += [f"status_{tp}" for tp in timepoint_names]
-    header += [f"fate_{tp}" for tp in timepoint_names]
-    header += [f"event_{tp}" for tp in timepoint_names]
     header += [f"{tp}_x" for tp in timepoint_names]
     header += [f"{tp}_y" for tp in timepoint_names]
     header += [f"{tp}_z" for tp in timepoint_names]
-    header += ["n_timepoints_seen", "n_timepoints_continuous"]
     return header
 
 
@@ -1040,15 +786,9 @@ def _build_registry_row(
     lineage_key = str(lineage.get("lineage_key") or pre_id or "")
     per_tp = dict(lineage.get("per_tp") or {})
     row_tps = list(lineage.get("timepoint_names") or timepoint_names)
-    active_label = ";".join(row_tps)
-    events_by_tp, formation_tp, _termination_tp, lifecycle = _derive_events_and_lifecycle(
-        row_tps, per_tp
-    )
-    first_seen_tp, last_seen_tp, censored_from_tp, right_censored = _lineage_summary_fields(
+    first_seen_tp, last_seen_tp = _lineage_summary_fields(
         lineage, per_tp, row_tps
     )
-    if right_censored and lifecycle not in ("stable", "transient", "persistent_engram"):
-        lifecycle = "right_censored"
     row: Dict[str, str] = {
         "animal_id": animal_id,
         "fov": str(fov),
@@ -1056,16 +796,9 @@ def _build_registry_row(
         "lineage_key": lineage_key,
         "pre_spine_id": pre_id,
         "anchor_timepoint": str(lineage.get("pre_timepoint", "") or ""),
-        "active_timepoints": active_label,
         "first_seen_tp": first_seen_tp,
         "last_seen_tp": last_seen_tp,
-        "censored_from_tp": censored_from_tp,
-        "formation_tp": formation_tp,
-        "lifecycle": lifecycle,
-        "right_censored": "1" if right_censored else "0",
     }
-    seen = 0
-    continuous_n = 0
     for tp in timepoint_names:
         td = per_tp.get(tp) or {}
         sid = str(td.get("spine_id") or "").strip()
@@ -1074,17 +807,10 @@ def _build_registry_row(
         row[f"id_{tp}"] = sid if tp in per_tp else ""
         row[f"local_id_{tp}"] = local_sid if tp in per_tp else ""
         row[f"status_{tp}"] = status
-        row[f"fate_{tp}"] = _fate_for_tp(td) if tp in per_tp else ""
-        row[f"event_{tp}"] = str(events_by_tp.get(tp) or "") if tp in row_tps else ""
-        row[f"{tp}_x"] = str(td.get("x", "")) if tp in per_tp and td.get("x") is not None else ""
-        row[f"{tp}_y"] = str(td.get("y", "")) if tp in per_tp and td.get("y") is not None else ""
-        row[f"{tp}_z"] = str(td.get("z", "")) if tp in per_tp and td.get("z") is not None else ""
-        if status in ("matched", "manual", "new"):
-            seen += 1
-        if tp in per_tp and _lineage_continuous_present(td):
-            continuous_n += 1
-    row["n_timepoints_seen"] = str(seen)
-    row["n_timepoints_continuous"] = str(continuous_n)
+        observed = status in ("matched", "new", "manual")
+        for axis in ("x", "y", "z"):
+            val = td.get(axis)
+            row[f"{tp}_{axis}"] = str(val) if observed and val is not None else ""
     return row
 
 
@@ -1110,49 +836,18 @@ def rebuild_registry_wide(
         writer.writeheader()
         for row in rows:
             writer.writerow({k: row.get(k, "") for k in header})
+    from . import observations_store
+
+    observations_store.rebuild_observations_long(
+        respan,
+        fov,
+        animal_id=aid,
+        lineages=lineages,
+        timepoint_names=timepoint_names,
+        out_dir=meta["dir"],
+        status_for_tp=_status_for_tp,
+    )
     return meta["registry"]
-
-
-def _append_registry_row(
-    registry_path: Path,
-    animal_id: str,
-    fov: int,
-    pre_spine_id: str,
-    timepoint_names: List[str],
-    per_tp: Dict[str, dict],
-    *,
-    last_seen_tp: str = "",
-    censored_from_tp: str = "",
-    right_censored: bool = False,
-) -> None:
-    """Legacy single-row append — prefer rebuild_registry_wide after each save."""
-    lineage = {
-        "pre_spine_id": pre_spine_id,
-        "pre_timepoint": "",
-        "timepoint_names": list(timepoint_names),
-        "first_seen_tp": "",
-        "last_seen_tp": last_seen_tp,
-        "censored_from_tp": censored_from_tp,
-        "right_censored": right_censored,
-        "per_tp": per_tp,
-    }
-    row = _build_registry_row(animal_id, fov, lineage, timepoint_names)
-    header = _registry_header(timepoint_names)
-    existing: List[dict] = []
-    lineage_id = f"L_{pre_spine_id}"
-    if registry_path.is_file():
-        with registry_path.open(newline="", encoding="utf-8") as fh:
-            reader = csv.DictReader(fh)
-            for r in reader:
-                if str(r.get("lineage_id", "")) == lineage_id:
-                    continue
-                existing.append(r)
-    existing.append({k: row.get(k, "") for k in header})
-    registry_path.parent.mkdir(parents=True, exist_ok=True)
-    with registry_path.open("w", newline="", encoding="utf-8") as fh:
-        writer = csv.DictWriter(fh, fieldnames=header, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(existing)
 
 
 def load_progress(respan: Path, fov: int) -> dict:
@@ -1226,16 +921,18 @@ def mark_reviewed(
 
 
 def _lineage_claim_ids_at_tp(lin: dict, timepoint: str) -> set[str]:
-    """Global/local ids at a timepoint that should leave the orphan pool."""
+    """Global/local ids at a timepoint that should leave the orphan pool.
+
+    Only actively matched spines (spine_id) are claimed. Released spines (removed_spine_id)
+    return to the orphan pool for re-matching elsewhere.
+    """
     out: set[str] = set()
     tp = str(timepoint)
     td = dict((lin.get("per_tp") or {}).get(tp) or {})
-    for sid in (
-        str(td.get("spine_id") or "").strip(),
-        str(td.get("removed_spine_id") or "").strip(),
-    ):
-        if sid:
-            out.add(sid)
+    # Only count spine_id (active match), not removed_spine_id (released)
+    sid = str(td.get("spine_id") or "").strip()
+    if sid:
+        out.add(sid)
     if str(lin.get("pre_timepoint") or "") == tp:
         for sid in (
             str(lin.get("lineage_key") or "").strip(),

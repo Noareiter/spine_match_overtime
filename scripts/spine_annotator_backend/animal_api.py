@@ -18,6 +18,7 @@ class AnimalConfigResponse(BaseModel):
     workspace: str = ""
     respan_root: str = ""
     results_root: str = ""
+    results_final_dir: str = ""
     default_fov: int = 1
     folder_open_depth: int = 2
     config_path: str = ""
@@ -92,6 +93,7 @@ def get_animal_config() -> AnimalConfigResponse:
         workspace=paths.get("workspace", ""),
         respan_root=respan,
         results_root=paths.get("results_root", ""),
+        results_final_dir=paths.get("results_final_dir", ""),
         default_fov=cfg.default_fov,
         folder_open_depth=cfg.folder_open_depth,
         config_path=paths.get("config_path", ""),
@@ -125,22 +127,11 @@ def bootstrap_respan() -> BootstrapResponse:
 @router.get("/inventory", response_model=FovInventoryResponse)
 def get_fov_inventory(fov: int = 1, timepoints: str = "") -> FovInventoryResponse:
     try:
-        from . import timepoint_selection
-
         cfg = animal_config.load_config()
         respan = animal_config.require_respan(cfg)
-        requested = timepoint_selection.parse_timepoint_query(timepoints)
-        saved = timepoint_selection.load(respan, fov)
-        selected = animal_config.resolve_active_timepoints(
-            cfg,
-            animal_layout.discover_available_timepoints(respan, fov),
-            requested=requested or None,
-            saved=saved or None,
-        )
-        inv = animal_layout.build_fov_inventory(
-            respan, fov, animal_id=cfg.animal_id, selected_timepoints=selected
-        )
-        catalog = animal_layout.list_timepoint_catalog(respan, fov, saved_selection=selected)
+        selected = animal_config.selected_timepoints(cfg)
+        inv = animal_layout.build_fov_inventory(respan, fov, animal_id=cfg.animal_id)
+        catalog = animal_layout.list_timepoint_catalog(respan, fov)
         return FovInventoryResponse(
             animal_id=inv.animal_id,
             fov=inv.fov,
@@ -152,15 +143,6 @@ def get_fov_inventory(fov: int = 1, timepoints: str = "") -> FovInventoryRespons
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-class ResetFovResponse(BaseModel):
-    ok: bool
-    fov: int
-    removed: List[str] = Field(default_factory=list)
-    kept: List[str] = Field(default_factory=list)
-    backup_dir: str = ""
-    message: str = ""
 
 
 class RebuildRegistryResponse(BaseModel):
@@ -194,28 +176,5 @@ def rebuild_registry(fov: int = 1) -> RebuildRegistryResponse:
             timepoint_names=tps,
             message=f"Rebuilt registry with {n} lineage(s), {len(tps)} timepoint column(s).",
         )
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@router.post("/reset-fov", response_model=ResetFovResponse)
-def reset_fov_workspace(
-    fov: int = 1,
-    backup: bool = True,
-    keep_dendrite_links: bool = False,
-) -> ResetFovResponse:
-    """Clear annotator metadata for one FOV. Set keep_dendrite_links=true to preserve dendrite links."""
-    try:
-        from . import fov_reset
-
-        cfg = animal_config.load_config()
-        respan = animal_config.require_respan(cfg)
-        result = fov_reset.reset_fov_annotator(
-            respan,
-            int(fov),
-            backup=bool(backup),
-            keep_dendrite_links=bool(keep_dendrite_links),
-        )
-        return ResetFovResponse(ok=True, **result)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

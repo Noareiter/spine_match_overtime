@@ -7,6 +7,7 @@ Local registration runs when a T1 base spine is selected.
 
 from __future__ import annotations
 
+import copy
 import csv
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,7 +20,18 @@ from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel, Field
 
 from . import animal_config, animal_layout, baseline_adapter, crop_service, dendrite_link_store
-from . import mtp_spine_matching, oof_segment_store, spine_lineage_store, manual_spine_store, ignored_spine_store, spine_catalog_store, spine_qc_store
+from . import (
+    mtp_spine_matching,
+    oof_segment_store,
+    spine_lineage_store,
+    manual_spine_store,
+    ignored_spine_store,
+    ignored_dendrite_store,
+    spine_catalog_store,
+    spine_qc_store,
+    spine_qc_tag_store,
+    results_final_store,
+)
 
 router = APIRouter(prefix="/mtp/viewer", tags=["multi-timepoint-spine-viewer"])
 
@@ -27,7 +39,8 @@ LOCAL_REG_WINDOW_PX = 40.0
 BLOCKING_FATES = frozenset({"lost"})
 REVIEW_MODE_LINEAGE = "lineage"
 REVIEW_MODE_TIMEPOINT = "timepoint"
-TIMEPOINT_FATES = frozenset({"artifact", "ignore", "new", "lost"})
+# Timepoint mode only supports artifact/ignore — NEW/LOST are derived, never manually set
+TIMEPOINT_FATES = frozenset({"artifact", "ignore"})
 
 
 class _ViewerState:
@@ -56,6 +69,7 @@ class _ViewerState:
         self.active_link_id: str = ""
         self.oof_segments: List[dict] = []
         self.ignored_by_tp: Dict[str, set] = {}
+        self.ignored_dendrites_by_tp: Dict[str, set] = {}
         self.review_progress: dict = {}
         self.skip_orphan_phases: bool = False
         self.catalog: Optional[spine_catalog_store.SpineCatalog] = None
@@ -69,6 +83,7 @@ class _ViewerState:
         self.lineage_b_key: str = ""
         self.conflict_focus_row: str = "a"
         self.coverage_summary: dict = {}
+        self.undo_stash: Optional[dict] = None
 
     def reset(self) -> None:
         self.__init__()
@@ -105,23 +120,45 @@ def _float_or_none(val) -> Optional[float]:
         return None
 
 
+def _check_contiguity_would_violate(pos_map: Dict[str, dict], timepoint_names: List[str]) -> Optional[str]:
+    """Check if current positions would violate contiguity if saved.
+
+    Returns error message if gap would be created, None if OK.
+    """
+    if not timepoint_names:
+        return None
+
+    first_match_idx = None
+    last_match_idx = None
+    matched_indices = []
+
+    for i, tp in enumerate(timepoint_names):
+        td = pos_map.get(tp) or {}
+        sid = str(td.get("spine_id") or "").strip()
+        if sid:
+            if first_match_idx is None:
+                first_match_idx = i
+            last_match_idx = i
+            matched_indices.append(i)
+
+    # No matches or single match is always OK
+    if not matched_indices or len(matched_indices) == 1:
+        return None
+
+    # Check for gap
+    for i in range(first_match_idx, last_match_idx + 1):
+        if i not in matched_indices:
+            gap_tp = timepoint_names[i]
+            return f"Would create gap: spine matched at {timepoint_names[first_match_idx]} and {timepoint_names[last_match_idx]}, but not at {gap_tp}. Matched timepoints must be contiguous."
+
+    return None
+
+
 def _find_registry_csv(respan: Path, fov: int) -> Optional[Path]:
     meta = respan / "_annotator" / f"fov{fov}" / "spine_registry_wide.csv"
     if meta.is_file():
         return meta
-    candidates: List[Path] = []
-    results = respan / "results"
-    if results.is_dir():
-        candidates.extend(results.rglob("spine_registry_wide.csv"))
-    for path in sorted(candidates, key=lambda p: p.stat().st_mtime, reverse=True):
-        try:
-            with path.open(newline="", encoding="utf-8") as fh:
-                row = next(csv.DictReader(fh), None)
-            if row and str(row.get("fov", "")).strip() == str(fov):
-                return path
-        except (OSError, StopIteration, csv.Error):
-            continue
-    return candidates[0] if candidates else None
+    return None
 
 
 def _parse_registry(path: Path, timepoint_names: List[str], *, fov: int) -> List[dict]:
@@ -134,8 +171,6 @@ def _parse_registry(path: Path, timepoint_names: List[str], *, fov: int) -> List
             members: Dict[str, dict] = {}
             for tp in timepoint_names:
                 sid = str(row.get(f"id_{tp}", "") or "").strip()
-                if sid.startswith("bridge_"):
-                    continue
                 if sid and sid.lower() not in {"nan", "none"}:
                     members[tp] = {
                         "spine_id": sid,
@@ -175,6 +210,35 @@ def _globalize_queue_item(q: dict, pre_tp: str, mid_tp: str) -> dict:
     return out
 
 
+def _tiff_paths_map() -> Dict[str, str]:
+    """Per-timepoint TIFF paths already resolved into _STATE.files at load time."""
+    return {tp: info.get("tiff") or None for tp, info in _STATE.files.items()}
+
+
+def _annotate_score_app(per_tp: Dict[str, dict]) -> None:
+    """Attach a reproducibility-only appearance score to each confirmed
+    match in-place, for consecutive timepoint pairs that both have a real
+    spine_id. Best-effort: leaves score_app/score_app_checkpoint absent if
+    the appearance model isn't configured or inference fails."""
+    tiff_paths = _tiff_paths_map()
+    names = _STATE.timepoint_names
+    for i in range(1, len(names)):
+        tp_prev, tp = names[i - 1], names[i]
+        cur = per_tp.get(tp)
+        prev = per_tp.get(tp_prev)
+        if not cur or not prev:
+            continue
+        if not cur.get("spine_id") or not prev.get("spine_id"):
+            continue
+        score, checkpoint = baseline_adapter.score_appearance_pair(
+            float(prev["x"]), float(prev["y"]), float(prev["z"]), tiff_paths.get(tp_prev),
+            float(cur["x"]), float(cur["y"]), float(cur["z"]), tiff_paths.get(tp),
+        )
+        if score is not None:
+            cur["score_app"] = score
+            cur["score_app_checkpoint"] = checkpoint
+
+
 def _build_queues() -> None:
     if len(_STATE.timepoint_names) < 2:
         _STATE.spine_queue = []
@@ -186,6 +250,12 @@ def _build_queues() -> None:
     mid_df = _STATE.spine_dfs.get(mid_tp)
     if pre_df is None or mid_df is None:
         return
+    claimed_mid_global = _claimed_spine_ids_by_tp().get(mid_tp, set())
+    exclude_mid_ids = (
+        {_STATE.catalog.to_local(mid_tp, gid) for gid in claimed_mid_global}
+        if _STATE.catalog
+        else set(claimed_mid_global)
+    )
     main, cross = mtp_spine_matching.build_pre_mid_queues(
         pre_df,
         mid_df,
@@ -193,6 +263,8 @@ def _build_queues() -> None:
         pre_tp=pre_tp,
         mid_tp=mid_tp,
         link_id=_STATE.active_link_id or None,
+        tiff_paths=_tiff_paths_map(),
+        exclude_mid_ids=exclude_mid_ids,
     )
     _STATE.spine_queue = [_globalize_queue_item(q, pre_tp, mid_tp) for q in main]
     _STATE.cross_dendrite_queue = [_globalize_queue_item(q, pre_tp, mid_tp) for q in cross]
@@ -231,10 +303,12 @@ def _orphan_spine_ids_at_tp(tp: str, respan: Path) -> List[str]:
         exclude_lineage_key=str(_STATE.active_t1_spine_id or ""),
         pending_lineage=pending,
     )
+    qc_tags = spine_qc_tag_store.load_tags(respan, _STATE.fov)
+    tagged_spines = spine_qc_tag_store.tagged_spines_at_tp(qc_tags, tp)
     orphans = [
         sid for sid in _sort_spine_ids(list(lookup.keys()))
         if sid not in claimed
-        and not str(sid).startswith("bridge_")
+        and sid not in tagged_spines
         and not _is_spine_ignored(tp, sid)
     ]
     return orphans
@@ -251,6 +325,33 @@ def _resolve_lineage_key_for_active() -> str:
         if lin:
             return str(lin.get("lineage_key") or lin.get("pre_spine_id") or candidate)
     return active
+
+
+def _claimed_spine_ids_by_tp(exclude_lineage_key: str = "") -> Dict[str, set]:
+    """Global ids unavailable as a fresh match candidate, per timepoint: already
+    claimed by another saved lineage, OR ignored (OOF region, manual QC tag, or
+    a whole ignored dendrite).
+
+    Used to keep ranking/suggestion (build_lineage_positions*, build_pre_mid_queues)
+    from ever offering one of these as a candidate for a different lineage - it
+    is skipped entirely, falling through to the next-best free candidate or a
+    coordinate-estimate fallback."""
+    if not _STATE.respan_root:
+        return {}
+    respan = _respan_path()
+    qc_tags = spine_qc_tag_store.load_tags(respan, _STATE.fov)
+    out: Dict[str, set] = {}
+    for tp in _STATE.timepoint_names:
+        claimed = spine_lineage_store.claimed_spine_ids_at_tp(
+            respan, _STATE.fov, tp, exclude_lineage_key=exclude_lineage_key
+        )
+        ignored = set(_STATE.ignored_by_tp.get(tp, set()))
+        tagged = spine_qc_tag_store.tagged_spines_at_tp(qc_tags, tp)
+        dendrite_ignored = ignored_dendrite_store.spine_ids_on_ignored_dendrites(
+            _STATE.ignored_dendrites_by_tp, tp, _STATE.spine_lookup.get(tp) or {}
+        )
+        out[tp] = claimed | ignored | tagged | dendrite_ignored
+    return out
 
 
 def _claimed_for_matching(tp: str) -> set[str]:
@@ -326,13 +427,14 @@ def _build_phase_queues(respan: Path) -> None:
         return
     phase0: List[str] = []
     seen: set[str] = set()
+    tagged0 = _qc_tagged_at_tp(tps[0])
     for q in _STATE.spine_queue:
         pid = str(q["pre_spine_id"])
-        if pid not in seen and not _is_spine_ignored(tps[0], pid):
+        if pid not in seen and not _is_unavailable_for_matching(tps[0], pid, tagged0):
             seen.add(pid)
             phase0.append(pid)
     for sid in _all_pre_spine_ids():
-        if sid not in seen and not _is_spine_ignored(tps[0], sid):
+        if sid not in seen and not _is_unavailable_for_matching(tps[0], sid, tagged0):
             seen.add(sid)
             phase0.append(sid)
     phases: List[List[str]] = [phase0]
@@ -607,15 +709,21 @@ def _markers_for_panel_positions(
         if not (x0 <= x < x1 and y0 <= y < y1):
             continue
         is_focus = sid_str == focus_id
+        is_focus_conflict = is_focus and sid_str in assigned_ids
         markers.append(
             {
                 "spine_id": str(sid),
                 "x": float((x - x0) / w * width),
                 "y": float((y - y0) / h * height),
+                "z": float(rec.get("z", 0)),
                 "label": str(rec.get("label") or rec.get("local_spine_id") or sid),
-                "role": "focus"
-                if is_focus
-                else ("manual" if str(sid).startswith("manual_") else "csv"),
+                "role": (
+                    "focus_conflict"
+                    if is_focus_conflict
+                    else "focus"
+                    if is_focus
+                    else ("manual" if str(sid).startswith("manual_") else "csv")
+                ),
                 "assigned": sid_str in assigned_ids and not is_focus,
             }
         )
@@ -1023,20 +1131,37 @@ def _registry_mtime_iso(path: Optional[Path]) -> str:
         return ""
 
 
+def _attach_results_final(respan: Path, out: dict, *, rebuild: bool = True) -> None:
+    """Add all-FOV completion status; build Results final when every FOV is done."""
+    cfg = animal_config.load_config()
+    statuses, all_complete = results_final_store.all_fovs_status(respan, cfg)
+    out["all_fovs_complete"] = all_complete
+    out["fov_completion_status"] = statuses
+    if not all_complete:
+        out["pending_fovs"] = [s["fov"] for s in statuses if not s["complete"]]
+        return
+    if not rebuild:
+        out["results_final_dir"] = str(results_final_store.results_final_dir(respan))
+        return
+    try:
+        built = results_final_store.build_results_final(respan, cfg)
+        build_msg = built.pop("message", "")
+        out.update(built)
+        if build_msg:
+            out["results_final_message"] = build_msg
+    except Exception as exc:
+        out["results_final_error"] = str(exc)
+
+
 def _apply_fate_rules(positions: Dict[str, dict]) -> Dict[str, dict]:
     tps = _STATE.timepoint_names
-    out = spine_lineage_store.strip_bridge_fates(positions, tps)
-    out = {k: dict(v) for k, v in out.items()}
-    for i, tp in enumerate(tps):
+    out = {tp: dict(positions.get(tp) or {}) for tp in tps}
+    for tp in tps:
         pos = dict(out.get(tp) or {})
         pos.setdefault("fate", None)
+        # LOST / ABSENT are inferred and A / I tag one detection, not the
+        # lineage, so nothing is locked after a LOST (rules review bug 30).
         pos["fate_locked"] = False
-        if i > 0:
-            prev = out.get(tps[i - 1]) or {}
-            prev_fate = str(prev.get("fate") or "").lower()
-            prev_scope = spine_lineage_store.decision_scope(prev)
-            if prev_fate == "lost" and prev_scope != spine_lineage_store.DECISION_SCOPE_LOCAL:
-                pos["fate_locked"] = True
         out[tp] = pos
     return out
 
@@ -1052,15 +1177,10 @@ def _all_prior_empty(positions: Dict[str, dict], idx: int) -> bool:
 
 
 def _false_positive_eligible(tp: str, positions: Dict[str, dict]) -> bool:
-    """False+ only when this TP has a match and every other TP is clear (no match, no fate)."""
-    pos = positions.get(tp) or {}
-    if not str(pos.get("spine_id") or "").strip():
-        return False
-    if spine_lineage_store._is_false_positive_mark(pos):
-        return False
-    return spine_lineage_store.all_other_timepoints_cleared(
-        positions, list(_STATE.timepoint_names), tp
-    )
+    """Always False: ARTIFACT / IGNORE are set only in Timepoint mode (S, then A / I),
+    one detection at one timepoint (rules review 29). The lineage-mode False+
+    buttons are hidden by this."""
+    return False
 
 
 def _fate_options_for_tp(
@@ -1078,7 +1198,7 @@ def _fate_options_for_tp(
     pos = positions.get(tp) or {}
     if pos.get("fate_locked"):
         return []
-    return ["artifact", "ignore", "new", "lost"]
+    return ["artifact", "ignore"]
 
 
 def _show_fate_dropdown(tp: str, positions: Dict[str, dict]) -> bool:
@@ -1093,13 +1213,92 @@ def _show_fate_dropdown(tp: str, positions: Dict[str, dict]) -> bool:
     return not pos.get("fate_locked")
 
 
+def _qc_tagged_at_tp(tp: str) -> set[str]:
+    """Spine ids (as stored) carrying a Timepoint-mode A/I tag at this timepoint."""
+    if not _STATE.respan_root:
+        return set()
+    tags = spine_qc_tag_store.load_tags(_respan_path(), _STATE.fov)
+    return set(spine_qc_tag_store.tagged_spines_at_tp(tags, tp))
+
+
+def _is_qc_tagged(tp: str, spine_id: str, tagged: Optional[set[str]] = None) -> bool:
+    """Spine carries a Timepoint-mode A/I tag at this timepoint.
+
+    Pass `tagged` (from _qc_tagged_at_tp) when checking many spines, so the tag
+    file is read once instead of once per spine.
+    """
+    sid = str(spine_id or "").strip()
+    if tagged is None:
+        tagged = _qc_tagged_at_tp(tp)
+    if sid in tagged:
+        return True
+    if _STATE.catalog and spine_catalog_store.is_global_id(sid):
+        return (_STATE.catalog.to_local(tp, sid) or "") in tagged
+    return False
+
+
+def _is_unavailable_for_matching(
+    tp: str, spine_id: str, tagged: Optional[set[str]] = None
+) -> bool:
+    """Ignored (OOF / ignored dendrite) or A/I-tagged: never part of a lineage."""
+    return _is_spine_ignored(tp, spine_id) or _is_qc_tagged(tp, spine_id, tagged)
+
+
+def _timepoints_to_clear(pos_map: Dict[str, dict], tp: str) -> List[str]:
+    """Clearing a timepoint after the spine has appeared means it disappeared
+    there: that timepoint and every later one are cleared (a lineage is never
+    split; Save infers LOST at tp). Before the first match only tp itself is
+    cleared (the spine starts later; NEW is inferred)."""
+    tps = list(_STATE.timepoint_names)
+    if tp not in tps:
+        return [tp]
+    i = tps.index(tp)
+    seen_before = any(
+        str((pos_map.get(t) or {}).get("spine_id") or "").strip() for t in tps[:i]
+    )
+    return tps[i:] if seen_before else [tp]
+
+
+def _drop_unavailable_from_open_panels() -> None:
+    """After a new OOF / ignore, the open lineage must not keep a spine that is
+    no longer in the pool. It is cleared like a Clear click at that timepoint
+    (coordinate focus kept), so a later part of the lineage is cleared too."""
+    for attr in ("positions", "positions_b"):
+        pos_map = getattr(_STATE, attr, None) or {}
+        hit = [
+            tp for tp in _STATE.timepoint_names
+            if str((pos_map.get(tp) or {}).get("spine_id") or "")
+            and _is_unavailable_for_matching(tp, str(pos_map[tp]["spine_id"]))
+        ]
+        if not hit:
+            continue
+        for t in _timepoints_to_clear(pos_map, hit[0]):
+            if t not in pos_map:
+                continue
+            pos = dict(pos_map[t])
+            pos["spine_id"] = None
+            pos["fate"] = None
+            pos["source"] = "oof_region" if t == hit[0] else "cleared"
+            pos_map[t] = pos
+        setattr(_STATE, attr, _apply_fate_rules(pos_map))
+
+
 def _is_spine_ignored(tp: str, spine_id: str) -> bool:
     sid = str(spine_id or "").strip()
     if _STATE.catalog and spine_catalog_store.is_global_id(sid):
         local = _STATE.catalog.to_local(tp, sid)
         if local and ignored_spine_store.is_ignored(_STATE.ignored_by_tp, tp, local):
             return True
-    return ignored_spine_store.is_ignored(_STATE.ignored_by_tp, tp, sid)
+    if ignored_spine_store.is_ignored(_STATE.ignored_by_tp, tp, sid):
+        return True
+    rec = (_STATE.spine_lookup.get(tp) or {}).get(sid) or {}
+    dendrite_id = str(rec.get("dendrite_id") or "")
+    return bool(
+        dendrite_id
+        and ignored_dendrite_store.is_dendrite_ignored(
+            _STATE.ignored_dendrites_by_tp, tp, dendrite_id
+        )
+    )
 
 
 def _sync_ignored_from_oof(respan: Path) -> None:
@@ -1128,12 +1327,7 @@ def _oof_overlays_for_panel(tp: str, bounds: dict, width: int, height: int) -> L
         return float((sx - x0) / w * width), float((sy - y0) / h * height)
 
     for seg in _STATE.oof_segments:
-        pre_tp = str(seg.get("pre_tp", ""))
-        per_tp = seg.get("per_tp") or {}
-        raw = per_tp.get(tp)
-        if raw is None and tp == pre_tp:
-            raw = seg.get("pre_shape") or seg.get("pre_bounds")
-        sh = oof_segment_store.normalize_shape(raw)
+        sh = oof_segment_store.segment_shape_at_timepoint(seg, tp)
         if not sh:
             continue
         bb = oof_segment_store.shape_bounds(sh)
@@ -1321,14 +1515,21 @@ def _nearest_spine(
     *,
     tp: str,
     dendrite_ids: Optional[set[str]] = None,
+    exclude: Optional[set[str]] = None,
+    max_dz: Optional[float] = None,
 ) -> Optional[dict]:
     best: Optional[dict] = None
     best_d = float("inf")
+    exclude = exclude or set()
     for sid, rec in lookup.items():
+        if str(sid) in exclude:
+            continue
         did = str(rec.get("dendrite_id") or "")
         if dendrite_ids and did not in dendrite_ids:
             continue
         if not _filter_oof_spine(rec, tp, dendrite_id=did):
+            continue
+        if max_dz is not None and abs(float(rec["z"]) - z) > max_dz:
             continue
         d = float(
             np.hypot(float(rec["x"]) - x, float(rec["y"]) - y)
@@ -1344,6 +1545,13 @@ def _nearest_spine(
                 "dendrite_id": did,
             }
     return best
+
+
+def _snap_exclusions(tp: str) -> set[str]:
+    """Spines a click-snap must skip: claimed by another lineage, OOF / ignored,
+    A/I-tagged, or on an ignored dendrite. The active lineage's own spines stay."""
+    out = set(_claimed_spine_ids_by_tp(exclude_lineage_key=_resolve_lineage_key_for_active()).get(tp, set()))
+    return out - _current_lineage_spine_ids()
 
 
 def _estimate_shift_at(
@@ -1630,6 +1838,9 @@ class LoadResponse(BaseModel):
     duplicate_count: int = 0
     unreviewed_count: int = 0
     spine_ids: List[str] = Field(default_factory=list)
+    all_fovs_complete: bool = False
+    results_final_dir: str = ""
+    pending_fovs: List[int] = Field(default_factory=list)
     message: str = ""
 
 
@@ -1778,7 +1989,7 @@ class OofTpBoundsRequest(BaseModel):
     y1: Optional[float] = None
     points: Optional[List[List[float]]] = None
     action: str = "update"
-    propagate_shift: bool = False   # if True, apply same delta to all other TPs
+    propagate_shift: bool = False   # ignored: OOF is single-timepoint (rules review 12)
 
 
 class FocusRequest(BaseModel):
@@ -1801,6 +2012,24 @@ class RestorePositionsRequest(BaseModel):
     positions: Dict[str, dict] = Field(default_factory=dict)
 
 
+class CommitTimepointFateRequest(BaseModel):
+    timepoint: str
+    fate: str
+
+
+class UndoLastDecisionResponse(BaseModel):
+    ok: bool
+    message: str
+    spine_id: Optional[str] = None
+    spine_ids: List[str] = Field(default_factory=list)
+    phase_index: Optional[int] = None
+    anchor_timepoint: Optional[str] = None
+    phase_kind: Optional[str] = None
+    coverage: dict = Field(default_factory=dict)
+    registry_path: str = ""
+    registry_mtime: str = ""
+
+
 # --------------------------------------------------------------------------- #
 # Routes
 # --------------------------------------------------------------------------- #
@@ -1811,24 +2040,15 @@ def load_from_animal(
     timepoints: str = "",
 ) -> LoadResponse:
     try:
-        from . import timepoint_selection
-
         cfg = animal_config.load_config()
         respan = animal_config.require_respan_root(cfg)
-        requested = timepoint_selection.parse_timepoint_query(timepoints)
-        saved = timepoint_selection.load(respan, fov)
-        available = animal_layout.discover_available_timepoints(respan, fov)
-        selected = animal_config.resolve_active_timepoints(
-            cfg,
-            available,
-            requested=requested or None,
-            saved=saved or None,
-        )
-        if requested:
-            timepoint_selection.save(respan, fov, selected, animal_id=cfg.animal_id)
-        inv = animal_layout.build_fov_inventory(
-            respan, fov, animal_id=cfg.animal_id, selected_timepoints=selected
-        )
+        missing = animal_config.missing_animal_files(cfg, respan)
+        if missing:
+            raise ValueError(
+                "Animal is incomplete — every FOV needs every selected timepoint: "
+                + "; ".join(missing)
+            )
+        inv = animal_layout.build_fov_inventory(respan, fov, animal_id=cfg.animal_id)
         _STATE.reset()
         _STATE.animal_id = cfg.animal_id
         _STATE.skip_orphan_phases = bool(cfg.skip_orphan_phases)
@@ -1851,9 +2071,12 @@ def load_from_animal(
 
         catalog_path_str = _apply_catalog(respan)
         _inject_manual_from_decisions(respan, fov)
-        _build_queues()
+        # Load every exclusion source before the first queue build, so OOF /
+        # ignored / ignored-dendrite spines are never ranked as candidates.
         _STATE.oof_segments = oof_segment_store.load_segments(respan, fov)
         _STATE.ignored_by_tp = ignored_spine_store.load_ignored(respan, fov)
+        _STATE.ignored_dendrites_by_tp = ignored_dendrite_store.load_ignored_dendrites(respan, fov)
+        _build_queues()
         _STATE.review_progress = spine_lineage_store.load_progress(respan, fov)
         _STATE.queue_phase_index = int(_STATE.review_progress.get("phase_index", 0) or 0)
         if _STATE.skip_orphan_phases:
@@ -1958,6 +2181,16 @@ def load_from_animal(
         if dec_path.is_file():
             dec_mtime = _registry_mtime_iso(dec_path)
 
+        load_extra: dict = {}
+        _attach_results_final(respan, load_extra)
+        final_msg = ""
+        if load_extra.get("results_final_dir"):
+            final_msg = f" Results final: {load_extra['results_final_dir']}."
+        elif load_extra.get("pending_fovs"):
+            final_msg = (
+                f" FOV(s) still pending: {', '.join(str(x) for x in load_extra['pending_fovs'])}."
+            )
+
         return LoadResponse(
             animal_id=_STATE.animal_id,
             fov=fov,
@@ -1985,7 +2218,10 @@ def load_from_animal(
             duplicate_count=dup_n,
             unreviewed_count=unrev_n,
             spine_ids=list(_STATE.t1_spine_ids),
-            message=" ".join(msg_parts),
+            all_fovs_complete=bool(load_extra.get("all_fovs_complete")),
+            results_final_dir=str(load_extra.get("results_final_dir") or ""),
+            pending_fovs=list(load_extra.get("pending_fovs") or []),
+            message=" ".join(msg_parts) + final_msg,
         )
     except HTTPException:
         raise
@@ -2048,10 +2284,11 @@ def list_t1_spines(offset: int = 0, limit: int = 100) -> T1SpinesResponse:
         if not rec and _STATE.queue_phase_index == 0:
             rec = (_STATE.spine_lookup.get(_STATE.t1_timepoint) or {}).get(sid, {})
         qitem = _queue_item(sid) if _STATE.queue_phase_index == 0 else None
+        local_spine_id = str(rec.get("local_spine_id") or (qitem.get("local_pre_spine_id") if qitem else "") or "")
         items.append(
             {
                 "spine_id": sid,
-                "local_spine_id": str(rec.get("local_spine_id") or qitem.get("local_pre_spine_id") or ""),
+                "local_spine_id": local_spine_id,
                 "anchor_timepoint": anchor_tp,
                 "phase_index": _STATE.queue_phase_index,
                 "dendrite_id": str(rec.get("dendrite_id") or ""),
@@ -2075,7 +2312,8 @@ def get_queue(mode: str = "main") -> dict:
 
 @router.post("/queue-mode")
 def set_queue_mode(req: QueueModeRequest) -> dict:
-    _STATE.queue_mode = "cross" if req.mode == "cross" else "main"
+    # Cross-dendrite suggestions were removed (rules review 19/20): main only.
+    _STATE.queue_mode = "main"
     _rebuild_spine_id_list()
     return {
         "queue_mode": _STATE.queue_mode,
@@ -2155,6 +2393,8 @@ def select_spine(req: SelectSpineRequest) -> SelectSpineResponse:
                 spine_dfs=_STATE.spine_dfs,
                 cross_links=_STATE.dendrite_links,
                 allow_cross_dendrite=_STATE.allow_cross_dendrite,
+                tiff_paths=_tiff_paths_map(),
+                claimed_spine_ids=_claimed_spine_ids_by_tp(exclude_lineage_key=gid),
             )
             positions, shifts, reg_applied = mtp_spine_matching.apply_local_registration(
                 positions,
@@ -2165,6 +2405,7 @@ def select_spine(req: SelectSpineRequest) -> SelectSpineResponse:
                 cross_links=_STATE.dendrite_links,
                 linked_dendrites_fn=_linked_dendrites,
                 oof_segments=_STATE.oof_segments,
+                exclude_spine_ids=_claimed_spine_ids_by_tp(exclude_lineage_key=gid),
             )
             _STATE.local_shifts = shifts
             positions = _apply_fate_rules(positions)
@@ -2202,6 +2443,8 @@ def select_spine(req: SelectSpineRequest) -> SelectSpineResponse:
                 cross_links=_STATE.dendrite_links,
                 registry_members=reg_members,
                 allow_cross_dendrite=cross or _STATE.allow_cross_dendrite,
+                tiff_paths=_tiff_paths_map(),
+                claimed_spine_ids=_claimed_spine_ids_by_tp(exclude_lineage_key=spine_id),
             )
             reg_tp = anchor_tp
         else:
@@ -2219,6 +2462,8 @@ def select_spine(req: SelectSpineRequest) -> SelectSpineResponse:
                     spine_dfs=_STATE.spine_dfs,
                     cross_links=_STATE.dendrite_links,
                     allow_cross_dendrite=_STATE.allow_cross_dendrite,
+                    tiff_paths=_tiff_paths_map(),
+                    claimed_spine_ids=_claimed_spine_ids_by_tp(exclude_lineage_key=spine_id),
                 )
             reg_tp = anchor_tp
         positions, shifts, reg_applied = mtp_spine_matching.apply_local_registration(
@@ -2230,6 +2475,7 @@ def select_spine(req: SelectSpineRequest) -> SelectSpineResponse:
             cross_links=_STATE.dendrite_links,
             linked_dendrites_fn=_linked_dendrites,
             oof_segments=_STATE.oof_segments,
+            exclude_spine_ids=_claimed_spine_ids_by_tp(exclude_lineage_key=spine_id),
         )
         _STATE.local_shifts = shifts
         if qitem and len(_STATE.timepoint_names) > 1:
@@ -2259,6 +2505,130 @@ def select_spine(req: SelectSpineRequest) -> SelectSpineResponse:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+def _jump_to_qc_phase_if_pending() -> Optional[str]:
+    """Unlike _snap_to_pending_qc_work (which only corrects a phase index already
+    at/past the QC phases), this jumps forward from anywhere -- including phase 0
+    -- the moment there's nothing left to do in the current phase.
+    """
+    dup_idx, unrev_idx = _qc_phase_indices()
+    dup_n, unrev_n = _pending_qc_counts()
+    if dup_n > 0:
+        _STATE.queue_phase_index = dup_idx
+        _rebuild_spine_id_list()
+        return f"Jumped to duplicate conflicts ({dup_n} pending)."
+    if unrev_n > 0:
+        _STATE.queue_phase_index = unrev_idx
+        _rebuild_spine_id_list()
+        return f"Jumped to unreviewed sweep ({unrev_n} pending)."
+    return None
+
+
+def _next_unresolved_index_in_current_phase() -> Optional[int]:
+    """Index of the next spine in the current phase queue that isn't reviewed yet."""
+    ids = _STATE.t1_spine_ids
+    if not ids:
+        return None
+    reviewed = set(_STATE.review_progress.get("reviewed_ids") or [])
+    cur = ids.index(_STATE.active_t1_spine_id) if _STATE.active_t1_spine_id in ids else -1
+    n = len(ids)
+    for offset in range(1, n + 1):
+        idx = (cur + offset) % n
+        if ids[idx] not in reviewed:
+            return idx
+    return None
+
+
+@router.post("/jump-unresolved")
+def jump_unresolved() -> dict:
+    """Jump to the next thing needing a decision: an un-reviewed spine in the
+    current phase, else the earliest QC phase (duplicates, then unreviewed
+    detections) that still has pending work.
+    """
+    try:
+        respan = _respan_path()
+        idx = _next_unresolved_index_in_current_phase()
+        if idx is not None:
+            resp = select_spine(SelectSpineRequest(t1_spine_id=_STATE.t1_spine_ids[idx]))
+        else:
+            snap_msg = _jump_to_qc_phase_if_pending()
+            resp = None
+            if snap_msg:
+                _ensure_nonempty_phase(respan)
+                if _STATE.t1_spine_ids:
+                    resp = select_spine(SelectSpineRequest(t1_spine_id=_STATE.t1_spine_ids[0]))
+                    resp.message = f"{snap_msg} {resp.message}".strip()
+            if resp is None:
+                return {
+                    **_select_spine_response(
+                        message="Nothing unresolved — full coverage in this FOV."
+                    ).model_dump(),
+                    "spine_ids": list(_STATE.t1_spine_ids),
+                    "phase_index": _STATE.queue_phase_index,
+                }
+        out = resp.model_dump()
+        out["spine_ids"] = list(_STATE.t1_spine_ids)
+        out["phase_index"] = _STATE.queue_phase_index
+        return out
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+class AcceptSuggestionRequest(BaseModel):
+    timepoint: str
+    lineage_row: str = ""
+
+
+@router.post("/accept-suggestion", response_model=SelectSpineResponse)
+def accept_suggestion(req: AcceptSuggestionRequest) -> SelectSpineResponse:
+    """Confirm the algorithm's current candidate at this TP without a click.
+
+    If the TP already holds a resolved spine_id (the common case -- the
+    algorithm's nearest-match is pre-filled), this just re-applies it. If the
+    focus was moved to a bare coordinate (no labeled spine under it), this
+    looks up the nearest spine there, exactly like clicking that marker would.
+    """
+    try:
+        _apply_conflict_edit_row(req.lineage_row)
+        tp = req.timepoint
+        if tp not in _STATE.timepoint_names:
+            raise ValueError(f"Unknown timepoint '{tp}'.")
+        pos_map = _active_positions()
+        pos = dict(pos_map.get(tp) or {})
+        sid = str(pos.get("spine_id") or "").strip()
+        lookup = _STATE.spine_lookup.get(tp) or {}
+        if not sid or sid not in lookup:
+            x, y, z = pos.get("x"), pos.get("y"), pos.get("z")
+            if x is None or y is None:
+                raise ValueError(f"No candidate to accept at '{tp}'.")
+            near = _nearest_spine(
+                lookup, float(x), float(y), float(z or 0), tp=tp,
+                exclude=_snap_exclusions(tp), max_dz=baseline_adapter.MAX_MATCH_Z_GAP,
+            )
+            if not near:
+                raise ValueError(f"No candidate to accept at '{tp}'.")
+            pos_map[tp] = {**near, "source": "accepted_suggestion", "fate": None}
+        else:
+            rec = lookup[sid]
+            pos_map[tp] = {
+                "spine_id": sid,
+                "x": float(rec["x"]),
+                "y": float(rec["y"]),
+                "z": float(rec["z"]),
+                "dendrite_id": str(rec.get("dendrite_id") or ""),
+                "source": "accepted_suggestion",
+                "fate": None,
+            }
+        contiguity_error = _check_contiguity_would_violate(pos_map, _STATE.timepoint_names)
+        if contiguity_error:
+            raise ValueError(contiguity_error)
+        _set_active_positions(_apply_fate_rules(pos_map))
+        return _select_spine_response(message=f"Accepted suggestion at {tp}.")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.post("/focus", response_model=SelectSpineResponse)
 def update_focus(req: FocusRequest) -> SelectSpineResponse:
     """Click-to-focus: update one timepoint focus and refresh zoom alignment."""
@@ -2274,11 +2644,21 @@ def update_focus(req: FocusRequest) -> SelectSpineResponse:
         if req.z_plane is not None:
             pos["z"] = float(req.z_plane)
         lookup = _STATE.spine_lookup.get(tp) or {}
-        near = _nearest_spine(lookup, pos["x"], pos["y"], pos["z"], tp=tp)
+        near = _nearest_spine(
+            lookup, pos["x"], pos["y"], pos["z"], tp=tp,
+            exclude=_snap_exclusions(tp), max_dz=baseline_adapter.MAX_MATCH_Z_GAP,
+        )
         if near:
-            pos.update(near)
-            pos["source"] = "click_nearest"
-            pos["fate"] = None
+            snapped = {**pos, **near, "source": "click_nearest", "fate": None}
+            trial = {**pos_map, tp: snapped}
+            # Focus always moves; a snap that would split the lineage is dropped
+            # (coordinate focus only) and Save explains the gap as everywhere else.
+            if _check_contiguity_would_violate(trial, _STATE.timepoint_names):
+                pos["spine_id"] = None
+                pos["source"] = "click_coord"
+                pos["fate"] = None
+            else:
+                pos = snapped
         else:
             pos["spine_id"] = None
             pos["source"] = "click_coord"
@@ -2393,6 +2773,9 @@ def add_manual_spine_click(req: AddManualSpineRequest) -> SelectSpineResponse:
         }
         if tp == pre_tp and sid not in _STATE.t1_spine_ids and not _is_duplicate_phase():
             _STATE.t1_spine_ids.append(sid)
+        contiguity_error = _check_contiguity_would_violate(pos_map, _STATE.timepoint_names)
+        if contiguity_error:
+            raise ValueError(contiguity_error)
         updated = _apply_fate_rules(pos_map)
         _set_active_positions(updated)
         return _select_spine_response(
@@ -2411,11 +2794,24 @@ def set_spine(req: SetSpineRequest) -> SelectSpineResponse:
         lookup = _STATE.spine_lookup.get(tp) or {}
         if sid not in lookup:
             raise ValueError(f"Spine '{sid}' not found at '{tp}'.")
-        claimed = _claimed_for_matching(tp)
-        if sid in claimed and sid not in _current_lineage_spine_ids():
+        if _is_unavailable_for_matching(tp, sid):
             raise ValueError(
-                f"Spine '{sid}' at '{tp}' is already assigned to another lineage."
+                f"Spine '{sid}' at '{tp}' is ignored (OOF region, QC tag, or an "
+                f"ignored dendrite) and cannot be matched. Un-ignore it first if "
+                f"this was a mistake."
             )
+        # A spine already claimed by another lineage is allowed here -- the
+        # "one spine, one lineage" invariant is enforced at export, not at
+        # click time (see find_duplicate_conflicts / apply_conflict_resolution).
+        # The claim just becomes a conflict the user resolves later, with both
+        # complete lineages in front of her instead of a forced snap decision.
+        claimed = _claimed_for_matching(tp)
+        warning = (
+            f"Spine '{sid}' at '{tp}' is already claimed by another lineage — "
+            f"this creates a conflict to resolve later (export is blocked until then)."
+            if sid in claimed and sid not in _current_lineage_spine_ids()
+            else ""
+        )
         rec = lookup[sid]
         pos_map = _active_positions()
         pos_map[tp] = {
@@ -2427,8 +2823,11 @@ def set_spine(req: SetSpineRequest) -> SelectSpineResponse:
             "source": "manual",
             "fate": None,
         }
+        contiguity_error = _check_contiguity_would_violate(pos_map, _STATE.timepoint_names)
+        if contiguity_error:
+            raise ValueError(contiguity_error)
         _set_active_positions(_apply_fate_rules(pos_map))
-        return _select_spine_response()
+        return _select_spine_response(message=warning)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -2441,22 +2840,31 @@ def clear_tp(req: ClearTpRequest) -> SelectSpineResponse:
         pos_map = _active_positions()
         if tp not in pos_map and tp not in _STATE.positions:
             raise ValueError(f"Timepoint '{tp}' not active.")
-        pos = dict(pos_map.get(tp) or {})
-        pos["spine_id"] = None
-        pos["fate"] = None
-        pos["artifact_mode"] = None
-        pos["removed_spine_id"] = None
-        pos.pop("decision_scope", None)
-        pos["source"] = "cleared"
-        pos_map[tp] = pos
-        if _STATE.review_mode == REVIEW_MODE_LINEAGE:
-            pos_map = spine_lineage_store.release_unbound_matches(
-                pos_map, _STATE.timepoint_names
-            )
-        _set_active_positions(_apply_fate_rules(pos_map))
-        return _select_spine_response(
-            message=f"Cleared {tp} — released spines return to matching pool.",
+        tps = list(_STATE.timepoint_names)
+        # Timepoint mode clears the anchor timepoint only.
+        to_clear = (
+            _timepoints_to_clear(pos_map, tp)
+            if _STATE.review_mode == REVIEW_MODE_LINEAGE
+            else [tp]
         )
+        for t in to_clear:
+            if t not in pos_map and t != tp:
+                continue
+            pos = dict(pos_map.get(t) or {})
+            pos["spine_id"] = None
+            pos["fate"] = None
+            pos["artifact_mode"] = None
+            pos["removed_spine_id"] = None
+            pos.pop("decision_scope", None)
+            pos["source"] = "cleared"
+            pos_map[t] = pos
+        _set_active_positions(_apply_fate_rules(pos_map))
+        msg = (
+            f"Cleared {tp} and every later timepoint — the spine disappears at {tp} (LOST on save)."
+            if len(to_clear) > 1
+            else f"Cleared {tp}."
+        )
+        return _select_spine_response(message=msg)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -2522,7 +2930,7 @@ def set_review_mode(req: ReviewModeRequest) -> SelectSpineResponse:
         raise HTTPException(status_code=400, detail=f"Invalid review mode '{mode}'.")
     _STATE.review_mode = mode
     anchor = _current_anchor_timepoint()
-    label = "Lineage mode" if mode == REVIEW_MODE_LINEAGE else f"Timepoint mode ({anchor}) · A/I/N/L"
+    label = "Lineage mode" if mode == REVIEW_MODE_LINEAGE else f"Timepoint mode ({anchor}) · A/I"
     return SelectSpineResponse(
         t1_spine_id=_STATE.active_t1_spine_id,
         positions=_positions_response(),
@@ -2546,7 +2954,7 @@ def set_fate(req: SetFateRequest) -> SelectSpineResponse:
         if tp not in pos_map and tp not in _STATE.positions:
             raise ValueError(f"Timepoint '{tp}' not active.")
         if fate and review_mode != REVIEW_MODE_TIMEPOINT:
-            raise ValueError("Press S (or click the mode button) for timepoint mode, then use A / I / N / L.")
+            raise ValueError("Press S (or click the mode button) for timepoint mode, then use A / I.")
         active = _current_anchor_timepoint()
         if _is_duplicate_phase():
             active = _conflict_timepoint() or active
@@ -2557,6 +2965,7 @@ def set_fate(req: SetFateRequest) -> SelectSpineResponse:
         pos = dict(pos_map.get(tp) or {})
         if pos.get("fate_locked"):
             raise ValueError(f"Fate blocked at '{tp}' (lineage LOST at previous timepoint).")
+        original_spine_id = str(pos.get("spine_id") or "")
         if pos.get("spine_id"):
             if review_mode == REVIEW_MODE_TIMEPOINT and fate:
                 pos["spine_id"] = None
@@ -2567,9 +2976,28 @@ def set_fate(req: SetFateRequest) -> SelectSpineResponse:
         allowed = _fate_options_for_tp(tp, pos_map, review_mode=review_mode)
         if fate and fate not in allowed:
             raise ValueError(f"Fate '{fate}' not allowed at '{tp}'.")
-        if fate:
+        respan = _respan_path()
+        if fate and review_mode == REVIEW_MODE_TIMEPOINT and fate in ("artifact", "ignore"):
+            spine_to_tag = original_spine_id
+            if pos.get("spine_id"):
+                pos["spine_id"] = None
+            spine_qc_tag_store.save_tag(
+                respan, _STATE.fov,
+                timepoint=tp,
+                spine_id=spine_to_tag,
+                tag=fate,
+                animal_id=_STATE.animal_id
+            )
+            pos["fate"] = None
+            pos["removed_spine_id"] = None
+            pos["artifact_mode"] = None
+            pos.pop("decision_scope", None)
+            pos["source"] = "cleared"
+        elif fate:
             _apply_local_fate(pos, fate)
         else:
+            spine_to_clear = pos.get("spine_id") or ""
+            spine_qc_tag_store.clear_tag(respan, _STATE.fov, timepoint=tp, spine_id=spine_to_clear, animal_id=_STATE.animal_id)
             pos["fate"] = None
             pos["spine_id"] = None
             pos["removed_spine_id"] = None
@@ -2577,11 +3005,13 @@ def set_fate(req: SetFateRequest) -> SelectSpineResponse:
             pos.pop("decision_scope", None)
             pos["source"] = "cleared"
         pos_map[tp] = pos
-        if fate and review_mode == REVIEW_MODE_TIMEPOINT:
-            pos_map = spine_lineage_store.release_unbound_matches(
-                pos_map, _STATE.timepoint_names
-            )
         _set_active_positions(_apply_fate_rules(pos_map))
+        if fate and review_mode == REVIEW_MODE_TIMEPOINT and fate in ("artifact", "ignore"):
+            # The QC tag just written changes this spine's disposition (no
+            # longer unreviewed) - refresh the cached queues now so it isn't
+            # offered again as if nothing happened, without needing a reload.
+            _build_phase_queues(respan)
+            _rebuild_spine_id_list()
         return _select_spine_response(
             anchor_timepoint=active,
             message=f"{fate.upper()} at {tp}" if fate else "Cleared",
@@ -2592,47 +3022,20 @@ def set_fate(req: SetFateRequest) -> SelectSpineResponse:
 
 @router.post("/set-fate-all-tps", response_model=SelectSpineResponse)
 def set_fate_all_tps(req: SetFateAllRequest) -> SelectSpineResponse:
-    """Lineage mode: clear matches and apply local ignore on every timepoint (Tab → I workflow)."""
-    try:
-        _apply_conflict_edit_row(req.lineage_row)
-        fate = str(req.fate or "").strip().lower()
-        review_mode = str(req.review_mode or _STATE.review_mode or REVIEW_MODE_LINEAGE).strip().lower()
-        if review_mode not in (REVIEW_MODE_LINEAGE, REVIEW_MODE_TIMEPOINT):
-            review_mode = REVIEW_MODE_LINEAGE
-        _STATE.review_mode = review_mode
-        if review_mode != REVIEW_MODE_LINEAGE:
-            raise ValueError("Ignore-all is for lineage mode only (Tab → I). In timepoint mode, I applies to the anchor TP.")
-        if fate != "ignore":
-            raise ValueError("Bulk all-timepoint fate supports IGNORE only.")
-        pos_map = _active_positions()
-        if not pos_map:
-            raise ValueError("No active spine.")
-        applied: List[str] = []
-        for tp in _STATE.timepoint_names:
-            pos = dict(pos_map.get(tp) or {})
-            if pos.get("fate_locked"):
-                continue
-            if pos.get("spine_id"):
-                pos["spine_id"] = None
-            _apply_local_fate(pos, fate)
-            pos_map[tp] = pos
-            applied.append(tp)
-        if not applied:
-            raise ValueError("No timepoint available for bulk ignore (all blocked by lineage LOST).")
-        _set_active_positions(_apply_fate_rules(pos_map))
-        active = _current_anchor_timepoint()
-        return _select_spine_response(
-            review_mode=_STATE.review_mode,
-            anchor_timepoint=active,
-            message=f"IGNORE on {len(applied)} timepoint(s)",
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    """Removed (rules review 29b): IGNORE is a Timepoint-mode tag on one detection."""
+    raise HTTPException(
+        status_code=400,
+        detail="Ignore-all-timepoints was removed. Press S for Timepoint mode, then I on one spine.",
+    )
 
 
 @router.post("/tag-false-positive", response_model=SelectSpineResponse)
 def tag_false_positive(req: TagFalsePositiveRequest) -> SelectSpineResponse:
-    """Remove a lone matched spine as false positive (algorithm noise vs OOF location)."""
+    """Removed (rules review 29): use Timepoint mode (S) + A / I on the detection."""
+    raise HTTPException(
+        status_code=400,
+        detail="False+ was removed. Press S for Timepoint mode, then A or I on this spine.",
+    )
     try:
         _apply_conflict_edit_row(req.lineage_row)
         tp = req.timepoint
@@ -2707,6 +3110,112 @@ def undo_positions(req: RestorePositionsRequest) -> SelectSpineResponse:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+def _complete_review_save(
+    respan: Path,
+    anchor_tp: str,
+    anchor_global: str,
+    save_info: dict,
+    *,
+    message: str = "",
+) -> dict:
+    """Shared tail of every "this spine is now reviewed" save: mark it reviewed,
+    rebuild the queues, advance the phase if finished, and build the response
+    the page uses to move on. message overrides the default "Saved ..." text."""
+    _STATE.coverage_summary = dict(save_info.get("coverage") or {})
+    was_last_in_phase = False
+    if _STATE.active_t1_spine_id in _STATE.t1_spine_ids:
+        was_last_in_phase = (
+            _STATE.t1_spine_ids.index(_STATE.active_t1_spine_id)
+            >= len(_STATE.t1_spine_ids) - 1
+        )
+    idx = (
+        _STATE.t1_spine_ids.index(_STATE.active_t1_spine_id)
+        if _STATE.active_t1_spine_id in _STATE.t1_spine_ids
+        else 0
+    )
+    prog = spine_lineage_store.mark_reviewed(
+        respan,
+        _STATE.fov,
+        _STATE.active_t1_spine_id,
+        idx,
+        phase_index=_STATE.queue_phase_index,
+        anchor_timepoint=anchor_tp,
+    )
+    _STATE.review_progress = prog
+    _build_phase_queues(respan)
+    _rebuild_spine_id_list()
+    phase_adv = _advance_phase_if_complete(respan, force_advance=was_last_in_phase)
+    out = {
+        "saved": True,
+        "pre_spine_id": _STATE.active_t1_spine_id,
+        "anchor_timepoint": anchor_tp,
+        "phase_index": _STATE.queue_phase_index,
+        "review_progress": _STATE.review_progress,
+        "queue_count": len(_STATE.t1_spine_ids),
+        "spine_ids": list(_STATE.t1_spine_ids),
+        "phase_advanced": bool(phase_adv),
+        "last_seen_tp": save_info.get("last_seen_tp", ""),
+        "lost_inferred": bool(save_info.get("lost_inferred")),
+    }
+    if save_info.get("lost_inferred"):
+        out["inference_message"] = (
+            f"Lost after {save_info.get('last_seen_tp') or '?'} "
+            f"(not seen in later timepoints)."
+        )
+    if phase_adv:
+        out.update(phase_adv)
+    out["review_mode"] = REVIEW_MODE_LINEAGE
+    tps = _STATE.timepoint_names
+    is_last_phase = _STATE.queue_phase_index >= _review_phase_count() - 1
+    is_last_spine = (
+        _STATE.active_t1_spine_id in _STATE.t1_spine_ids
+        and _STATE.t1_spine_ids.index(_STATE.active_t1_spine_id)
+        >= len(_STATE.t1_spine_ids) - 1
+    )
+    out["review_complete"] = bool(
+        is_last_phase
+        and is_last_spine
+        and not phase_adv
+        and int((_STATE.coverage_summary or {}).get("unreviewed", 1)) == 0
+        and int((_STATE.coverage_summary or {}).get("duplicate_unresolved", 1)) == 0
+    )
+    out["review_mode"] = REVIEW_MODE_LINEAGE
+    out["phase_kind"] = _current_phase_kind()
+    out["coverage"] = dict(_STATE.coverage_summary or {})
+    reg_path = str(save_info.get("registry_path") or "")
+    if not reg_path:
+        reg_path = str(respan / "_annotator" / f"fov{_STATE.fov}" / "spine_registry_wide.csv")
+    out["registry_path"] = reg_path
+    out["registry_mtime"] = _registry_mtime_iso(Path(reg_path))
+    out["decisions_path"] = str(save_info.get("path") or "")
+    out["disposition_path"] = str(save_info.get("disposition_path") or "")
+    out["coverage"] = dict(_STATE.coverage_summary or {})
+    out["message"] = message or (
+        f"Saved {anchor_global} — registry updated ({len(_STATE.review_progress.get('reviewed_ids', []) or [])} spine(s))."
+    )
+    if out["review_complete"]:
+        cov = _STATE.coverage_summary or {}
+        _attach_results_final(respan, out)
+        if out.get("all_fovs_complete") and out.get("results_final_dir"):
+            out["message"] = (
+                f"Review complete for FOV {_STATE.fov}. "
+                f"All FOVs done — Results final: {out['results_final_dir']}"
+            )
+        elif out.get("pending_fovs"):
+            pending = ", ".join(str(x) for x in out["pending_fovs"])
+            out["message"] = (
+                f"Review complete for FOV {_STATE.fov} "
+                f"({cov.get('tagged', '?')}/{cov.get('catalog_total', '?')} tagged). "
+                f"Still pending: FOV {pending}."
+            )
+        else:
+            out["message"] = (
+                f"Review complete — {cov.get('tagged', '?')}/{cov.get('catalog_total', '?')} spines tagged · "
+                f"0 duplicates · 0 unreviewed."
+            )
+    return out
+
+
 @router.post("/confirm-lineage")
 def confirm_lineage() -> dict:
     try:
@@ -2720,6 +3229,17 @@ def confirm_lineage() -> dict:
         respan = _respan_path()
         anchor_tp = _current_anchor_timepoint()
         per_tp = _save_positions_snapshot()
+        unavailable = [
+            f"{tp} ({td.get('spine_id')})"
+            for tp, td in per_tp.items()
+            if td.get("spine_id") and _is_unavailable_for_matching(tp, str(td.get("spine_id")))
+        ]
+        if unavailable:
+            raise ValueError(
+                "Cannot save: spine(s) inside an OOF region, A/I-tagged, or on an "
+                "ignored dendrite: " + ", ".join(unavailable) + ". Clear them first."
+            )
+        _annotate_score_app(per_tp)
         if _is_unreviewed_phase():
             tp, anchor_global = spine_qc_store.parse_queue_id(_STATE.active_t1_spine_id)
             anchor_tp = tp or anchor_tp
@@ -2730,6 +3250,17 @@ def confirm_lineage() -> dict:
             if _STATE.catalog
             else anchor_global
         )
+        prior_entry = spine_lineage_store.get_lineage_by_key(respan, _STATE.fov, anchor_global)
+        prior_progress = spine_lineage_store.load_progress(respan, _STATE.fov)
+        _STATE.undo_stash = {
+            "lineage_key": anchor_global,
+            "reviewed_id": str(_STATE.active_t1_spine_id),
+            "was_already_reviewed": str(_STATE.active_t1_spine_id)
+            in (prior_progress.get("reviewed_ids") or []),
+            "phase_index": int(prior_progress.get("phase_index", 0) or 0),
+            "anchor_timepoint": str(prior_progress.get("anchor_timepoint") or ""),
+            "prior_entry": copy.deepcopy(prior_entry) if prior_entry else None,
+        }
         save_info = spine_lineage_store.save_decision(
             respan,
             _STATE.fov,
@@ -2743,97 +3274,191 @@ def confirm_lineage() -> dict:
             ignored_by_tp=_STATE.ignored_by_tp,
             shifts=_STATE.local_shifts,
         )
-        _STATE.coverage_summary = dict(save_info.get("coverage") or {})
-        was_last_in_phase = False
-        if _STATE.active_t1_spine_id in _STATE.t1_spine_ids:
-            was_last_in_phase = (
-                _STATE.t1_spine_ids.index(_STATE.active_t1_spine_id)
-                >= len(_STATE.t1_spine_ids) - 1
-            )
-        idx = (
-            _STATE.t1_spine_ids.index(_STATE.active_t1_spine_id)
-            if _STATE.active_t1_spine_id in _STATE.t1_spine_ids
-            else 0
+        return _complete_review_save(respan, anchor_tp, anchor_global, save_info)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _undo_timepoint_fate(respan: Path, stash: dict) -> dict:
+    """Reverse commit_timepoint_fate: restore the prior tag (or clear it),
+    bring back any deleted lineages, and roll reviewed progress back."""
+    tp = str(stash["timepoint"])
+    spine_id = str(stash["spine_id"])
+    prior_tag = str(stash.get("prior_tag") or "")
+    if prior_tag:
+        spine_qc_tag_store.save_tag(
+            respan, _STATE.fov, timepoint=tp, spine_id=spine_id,
+            tag=prior_tag, animal_id=_STATE.animal_id,
         )
-        prog = spine_lineage_store.mark_reviewed(
+    else:
+        spine_qc_tag_store.clear_tag(
+            respan, _STATE.fov, timepoint=tp, spine_id=spine_id,
+            animal_id=_STATE.animal_id,
+        )
+    spine_lineage_store.restore_lineages(
+        respan, _STATE.fov, list(stash.get("removed_lineages") or [])
+    )
+    prog = spine_lineage_store.load_progress(respan, _STATE.fov)
+    phase_index = int(stash.get("phase_index", 0) or 0)
+    anchor_timepoint = str(stash.get("anchor_timepoint") or "")
+    spine_lineage_store.save_progress(
+        respan,
+        _STATE.fov,
+        index=int(prog.get("last_pre_spine_index", 0) or 0),
+        reviewed_ids=list(stash.get("reviewed_ids") or []),
+        phase_index=phase_index,
+        anchor_timepoint=anchor_timepoint,
+    )
+    _, coverage = spine_qc_store.rebuild_spine_disposition(
+        respan,
+        _STATE.fov,
+        animal_id=_STATE.animal_id,
+        timepoint_names=_STATE.timepoint_names,
+        ignored_by_tp=_STATE.ignored_by_tp,
+    )
+    registry = spine_lineage_store.paths(respan, _STATE.fov)["registry"]
+    return {
+        "ok": True,
+        "spine_id": str(stash.get("reviewed_id") or ""),
+        "phase_index": phase_index,
+        "anchor_timepoint": anchor_timepoint,
+        "registry_path": str(registry),
+        "coverage": coverage,
+        "message": f"Undid {tp} tag on {spine_id}"
+        + (" and restored its lineage." if stash.get("removed_lineages") else "."),
+    }
+
+
+@router.post("/commit-timepoint-fate")
+def commit_timepoint_fate(req: CommitTimepointFateRequest) -> dict:
+    """Timepoint mode: save a staged artifact/ignore for ONE spine at ONE timepoint.
+
+    Writes only that spine's QC tag. Any saved lineage that claims the spine at
+    this timepoint is deleted outright - its other timepoints are not carried
+    over and return to the unmatched pool, available in later rounds. The open
+    panel is never saved as a lineage.
+    """
+    try:
+        if not _STATE.active_t1_spine_id:
+            raise ValueError("No active spine.")
+        if _is_duplicate_phase():
+            raise ValueError("Not available in the duplicate conflict phase.")
+        tp = str(req.timepoint or "").strip()
+        fate = str(req.fate or "").strip().lower()
+        if fate not in ("artifact", "ignore"):
+            raise ValueError(f"Invalid fate '{fate}'.")
+        anchor_tp = _current_anchor_timepoint()
+        if tp != anchor_tp:
+            raise ValueError(f"Timepoint mode applies to the current anchor '{anchor_tp}' only.")
+        spine_id = str((_STATE.positions.get(tp) or {}).get("spine_id") or "").strip()
+        if not spine_id:
+            raise ValueError(f"No spine at '{tp}' to tag as {fate}.")
+        respan = _respan_path()
+        anchor_global = (
+            spine_qc_store.parse_queue_id(_STATE.active_t1_spine_id)[1]
+            if _is_unreviewed_phase()
+            else str(_STATE.active_t1_spine_id)
+        ) or spine_id
+
+        prior_progress = spine_lineage_store.load_progress(respan, _STATE.fov)
+        prior_tags = spine_qc_tag_store.load_tags(respan, _STATE.fov)
+        prior_tag = str((prior_tags.get(tp) or {}).get(spine_id) or "")
+        removed = spine_lineage_store.delete_lineages_claiming(
+            respan, _STATE.fov, tp, {spine_id}
+        )
+        spine_qc_tag_store.save_tag(
+            respan, _STATE.fov,
+            timepoint=tp,
+            spine_id=spine_id,
+            tag=fate,
+            animal_id=_STATE.animal_id,
+        )
+        _STATE.undo_stash = {
+            "kind": "timepoint_fate",
+            "timepoint": tp,
+            "spine_id": spine_id,
+            "prior_tag": prior_tag,
+            "removed_lineages": copy.deepcopy(removed),
+            "reviewed_id": str(_STATE.active_t1_spine_id),
+            "reviewed_ids": list(prior_progress.get("reviewed_ids") or []),
+            "phase_index": int(prior_progress.get("phase_index", 0) or 0),
+            "anchor_timepoint": str(prior_progress.get("anchor_timepoint") or ""),
+        }
+        _STATE.review_mode = REVIEW_MODE_LINEAGE
+        disp, coverage = spine_qc_store.rebuild_spine_disposition(
             respan,
             _STATE.fov,
-            _STATE.active_t1_spine_id,
-            idx,
-            phase_index=_STATE.queue_phase_index,
-            anchor_timepoint=anchor_tp,
+            animal_id=_STATE.animal_id,
+            timepoint_names=_STATE.timepoint_names,
+            ignored_by_tp=_STATE.ignored_by_tp,
         )
-        _STATE.review_progress = prog
+        meta = spine_lineage_store.paths(respan, _STATE.fov)
+        save_info = {
+            "coverage": coverage,
+            "registry_path": str(meta["registry"]),
+            "path": str(meta["decisions"]),
+            "disposition_path": str(disp),
+        }
+        freed = f" · lineage deleted ({len(removed)}), other timepoints freed" if removed else ""
+        return _complete_review_save(
+            respan,
+            anchor_tp,
+            anchor_global,
+            save_info,
+            message=f"{fate.upper()} saved for {spine_id} at {tp} only{freed}.",
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/undo-last-decision", response_model=UndoLastDecisionResponse)
+def undo_last_decision() -> UndoLastDecisionResponse:
+    """Reverse the single most recent confirm-lineage save: restores the
+    lineage's exact prior state (or removes it if it was a brand-new
+    confirm) and puts the spine back in the unreviewed queue. One level of
+    undo only — a second call with nothing pending returns ok=False.
+    """
+    try:
+        stash = _STATE.undo_stash
+        if not stash:
+            return UndoLastDecisionResponse(ok=False, message="Nothing to undo.")
+        _STATE.undo_stash = None
+        respan = _respan_path()
+        if stash.get("kind") == "timepoint_fate":
+            result = _undo_timepoint_fate(respan, stash)
+        else:
+            result = spine_lineage_store.apply_undo_snapshot(
+                respan,
+                _STATE.fov,
+                stash,
+                timepoint_names=_STATE.timepoint_names,
+                ignored_by_tp=_STATE.ignored_by_tp,
+            )
+        if not result.get("ok"):
+            return UndoLastDecisionResponse(ok=False, message=result.get("message") or "Nothing to undo.")
+
+        _STATE.review_progress = spine_lineage_store.load_progress(respan, _STATE.fov)
+        _STATE.coverage_summary = dict(result.get("coverage") or {})
+        _STATE.queue_phase_index = int(result.get("phase_index") or 0)
         _build_phase_queues(respan)
         _rebuild_spine_id_list()
-        phase_adv = _advance_phase_if_complete(respan, force_advance=was_last_in_phase)
-        out = {
-            "saved": True,
-            "pre_spine_id": _STATE.active_t1_spine_id,
-            "anchor_timepoint": anchor_tp,
-            "phase_index": _STATE.queue_phase_index,
-            "review_progress": _STATE.review_progress,
-            "queue_count": len(_STATE.t1_spine_ids),
-            "spine_ids": list(_STATE.t1_spine_ids),
-            "phase_advanced": bool(phase_adv),
-            "last_seen_tp": save_info.get("last_seen_tp", ""),
-            "lost_inferred": bool(save_info.get("lost_inferred")),
-            "censored_from_tp": save_info.get("censored_from_tp", ""),
-            "right_censored": bool(save_info.get("right_censored")),
-        }
-        if save_info.get("right_censored"):
-            out["inference_message"] = (
-                f"Right-censored from {save_info.get('censored_from_tp') or 'final TP'} "
-                f"(last seen at {save_info.get('last_seen_tp') or '?'} — not classified as lost)."
-            )
-        elif save_info.get("censored_from_tp"):
-            out["inference_message"] = (
-                f"Censored from {save_info['censored_from_tp']} "
-                f"(last seen at {save_info.get('last_seen_tp') or '?'} — loss not inferred)."
-            )
-        elif save_info.get("lost_inferred"):
-            out["inference_message"] = (
-                f"Lost after {save_info.get('last_seen_tp') or '?'} "
-                f"(not seen in later timepoints)."
-            )
-        if phase_adv:
-            out.update(phase_adv)
-        out["review_mode"] = REVIEW_MODE_LINEAGE
-        tps = _STATE.timepoint_names
-        is_last_phase = _STATE.queue_phase_index >= _review_phase_count() - 1
-        is_last_spine = (
-            _STATE.active_t1_spine_id in _STATE.t1_spine_ids
-            and _STATE.t1_spine_ids.index(_STATE.active_t1_spine_id)
-            >= len(_STATE.t1_spine_ids) - 1
+        spine_id = str(result.get("spine_id") or "")
+        if spine_id and spine_id in _STATE.t1_spine_ids:
+            _STATE.active_t1_spine_id = spine_id
+
+        reg_path = str(result.get("registry_path") or "")
+        return UndoLastDecisionResponse(
+            ok=True,
+            message=result.get("message") or "Undid last save.",
+            spine_id=spine_id,
+            spine_ids=list(_STATE.t1_spine_ids),
+            phase_index=_STATE.queue_phase_index,
+            anchor_timepoint=str(result.get("anchor_timepoint") or ""),
+            phase_kind=_current_phase_kind(),
+            coverage=dict(result.get("coverage") or {}),
+            registry_path=reg_path,
+            registry_mtime=_registry_mtime_iso(Path(reg_path)) if reg_path else "",
         )
-        out["review_complete"] = bool(
-            is_last_phase
-            and is_last_spine
-            and not phase_adv
-            and int((_STATE.coverage_summary or {}).get("unreviewed", 1)) == 0
-            and int((_STATE.coverage_summary or {}).get("duplicate_unresolved", 1)) == 0
-        )
-        out["review_mode"] = REVIEW_MODE_LINEAGE
-        out["phase_kind"] = _current_phase_kind()
-        out["coverage"] = dict(_STATE.coverage_summary or {})
-        reg_path = str(save_info.get("registry_path") or "")
-        if not reg_path:
-            reg_path = str(respan / "_annotator" / f"fov{_STATE.fov}" / "spine_registry_wide.csv")
-        out["registry_path"] = reg_path
-        out["registry_mtime"] = _registry_mtime_iso(Path(reg_path))
-        out["decisions_path"] = str(save_info.get("path") or "")
-        out["disposition_path"] = str(save_info.get("disposition_path") or "")
-        out["coverage"] = dict(_STATE.coverage_summary or {})
-        out["message"] = (
-            f"Saved {anchor_global} — registry updated ({len(_STATE.review_progress.get('reviewed_ids', []) or [])} spine(s))."
-        )
-        if out["review_complete"]:
-            cov = _STATE.coverage_summary or {}
-            out["message"] = (
-                f"Review complete — {cov.get('tagged', '?')}/{cov.get('catalog_total', '?')} spines tagged · "
-                f"0 duplicates · 0 unreviewed."
-            )
-        return out
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -2963,6 +3588,18 @@ def resolve_conflict(req: ResolveConflictRequest) -> dict:
             out["message"] = (
                 f"Review complete — {cov.get('tagged', '?')}/{cov.get('catalog_total', '?')} spines tagged."
             )
+            _attach_results_final(respan, out)
+            if out.get("results_final_dir") and out.get("all_fovs_complete"):
+                out["message"] = (
+                    f"Review complete for FOV {_STATE.fov}. "
+                    f"All FOVs done — Results final: {out['results_final_dir']}"
+                )
+            elif out.get("pending_fovs"):
+                pending = ", ".join(str(x) for x in out["pending_fovs"])
+                out["message"] = (
+                    f"Review complete for FOV {_STATE.fov}. "
+                    f"Still pending: FOV {pending}."
+                )
         return out
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -3009,40 +3646,25 @@ def upsert_oof_segment(req: OofSegmentRequest) -> dict:
         else:
             src_shape = oof_segment_store.rect_shape(req.x0, req.y0, req.x1, req.y1)
 
-        did = _active_pre_dendrite_id()
-        pre_tp = _STATE.t1_timepoint
-        apply_tps = list(req.apply_timepoints or [tp])
-        valid = set(_STATE.timepoint_names)
-        apply_tps = [t for t in apply_tps if t in valid]
-        if not apply_tps:
-            apply_tps = [tp]
-        shifts = _STATE.local_shifts or {}
-
-        pre_shape = oof_segment_store.shape_between_timepoints(
-            src_shape, tp, pre_tp, pre_tp=pre_tp, shifts=shifts
-        )
-        per_tp: Dict[str, dict] = {}
-        ignored_add: Dict[str, List[str]] = {}
-        for dst in apply_tps:
-            dst_shape = oof_segment_store.shape_between_timepoints(
-                src_shape, tp, dst, pre_tp=pre_tp, shifts=shifts
+        # OOF applies only to the timepoint it was drawn on (rules review 12):
+        # no projection to other timepoints, apply_timepoints is ignored.
+        if tp not in _STATE.timepoint_names:
+            raise ValueError(f"Timepoint '{tp}' not active.")
+        ignored_add: Dict[str, List[str]] = {
+            tp: oof_segment_store.spines_inside_shape(
+                src_shape, tp, _STATE.spine_lookup.get(tp) or {}
             )
-            if dst != pre_tp:
-                per_tp[dst] = dst_shape
-            lookup = _STATE.spine_lookup.get(dst) or {}
-            ignored_add[dst] = oof_segment_store.spines_inside_shape(
-                dst_shape, dst, lookup
-            )
-
+        }
         entry = oof_segment_store.upsert_segment(
             respan,
             _STATE.fov,
             animal_id=_STATE.animal_id,
             segment_id=req.segment_id,
-            dendrite_id_pre=did,
-            pre_tp=pre_tp,
-            pre_shape=pre_shape,
-            per_tp=per_tp,
+            dendrite_id_pre=_active_pre_dendrite_id(),
+            pre_tp=tp,
+            pre_shape=src_shape,
+            per_tp={tp: src_shape},
+            drawn_tp=tp,
         )
         _STATE.oof_segments = oof_segment_store.load_segments(respan, _STATE.fov)
         _STATE.ignored_by_tp = ignored_spine_store.add_ignored(
@@ -3051,11 +3673,14 @@ def upsert_oof_segment(req: OofSegmentRequest) -> dict:
             animal_id=_STATE.animal_id,
             by_tp_add=ignored_add,
         )
+        _drop_unavailable_from_open_panels()
         _build_phase_queues(respan)
         _rebuild_spine_id_list()
         _ensure_nonempty_phase(respan)
         n_ignored = sum(len(v) for v in ignored_add.values())
         return {
+            "positions": _positions_response() if _STATE.active_t1_spine_id else {},
+            "positions_b": _positions_response_b(),
             "segment": entry,
             "segments": _STATE.oof_segments,
             "ignored_spines": {k: v for k, v in ignored_add.items() if v},
@@ -3090,12 +3715,6 @@ def update_oof_tp(req: OofTpBoundsRequest) -> dict:
                     float(req.x1 or 0),
                     float(req.y1 or 0),
                 )
-            # Find old shape to compute delta for propagation
-            segs_before = oof_segment_store.load_segments(respan, _STATE.fov)
-            old_seg = next(
-                (s for s in segs_before if str(s.get("segment_id","")) == req.segment_id),
-                None,
-            )
             seg = oof_segment_store.update_tp_shape(
                 respan,
                 _STATE.fov,
@@ -3104,40 +3723,17 @@ def update_oof_tp(req: OofTpBoundsRequest) -> dict:
                 tp=req.timepoint,
                 shape=shape,
             )
-            # Propagate move delta to other TPs
-            if req.propagate_shift and seg and old_seg and shape["shape"] == "rect":
-                old_sh = oof_segment_store.segment_shape_at_timepoint(old_seg, req.timepoint)
-                if old_sh and old_sh["shape"] == "rect":
-                    dx = shape["x0"] - old_sh["x0"]
-                    dy = shape["y0"] - old_sh["y0"]
-                    per_tp = seg.get("per_tp") or {}
-                    pre_tp_name = str(seg.get("pre_tp", ""))
-                    all_tps = list(_STATE.timepoint_names)
-                    for other_tp in all_tps:
-                        if other_tp == req.timepoint:
-                            continue
-                        other_sh = oof_segment_store.segment_shape_at_timepoint(seg, other_tp)
-                        if other_sh:
-                            moved = oof_segment_store.translate_shape_by(other_sh, dx, dy)
-                            oof_segment_store.update_tp_shape(
-                                respan, _STATE.fov,
-                                animal_id=_STATE.animal_id,
-                                segment_id=req.segment_id,
-                                tp=other_tp,
-                                shape=moved,
-                            )
-                    seg = oof_segment_store.load_segments(respan, _STATE.fov)
-                    seg = next(
-                        (s for s in seg if str(s.get("segment_id","")) == req.segment_id), None
-                    )
         if not seg:
             raise HTTPException(status_code=404, detail="OOF segment not found.")
         _STATE.oof_segments = oof_segment_store.load_segments(respan, _STATE.fov)
         _sync_ignored_from_oof(respan)
+        _drop_unavailable_from_open_panels()
         _build_phase_queues(respan)
         _rebuild_spine_id_list()
         _ensure_nonempty_phase(respan)
         return {
+            "positions": _positions_response() if _STATE.active_t1_spine_id else {},
+            "positions_b": _positions_response_b(),
             "segment": seg,
             "segments": _STATE.oof_segments,
             "queue_count": len(_STATE.t1_spine_ids),

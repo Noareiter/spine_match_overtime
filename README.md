@@ -23,11 +23,10 @@ Built **automatically** when you load a FOV (dendrite linker or spine tracker).
 
 UI labels show `local (S_*)`. Lineage saves use `lineage_key` = global ID (no cross-timepoint collisions).
 
-See **HOW_TO_WORK.txt** (Hebrew) or **HOW_TO_WORK_EN.txt** (English) for workflow, fate logic, and output semantics.
+See **HOW_TO_WORK.txt** (Hebrew) for workflow, fate logic, and output semantics.
 
 ## Run
 
 - **Real animal:** `start_annotator.bat` (edit `config/annotator.json` first)
-- **Demo:** `start_demo_annotator.bat`
 
 Browser: `http://127.0.0.1:8010/mtp/` (dendrite links) · `/mtp/viewer/` (spine tracker)
