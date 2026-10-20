@@ -1244,23 +1244,43 @@ def _is_unavailable_for_matching(
     return _is_spine_ignored(tp, spine_id) or _is_qc_tagged(tp, spine_id, tagged)
 
 
+def _timepoints_to_clear(pos_map: Dict[str, dict], tp: str) -> List[str]:
+    """Clearing a timepoint after the spine has appeared means it disappeared
+    there: that timepoint and every later one are cleared (a lineage is never
+    split; Save infers LOST at tp). Before the first match only tp itself is
+    cleared (the spine starts later; NEW is inferred)."""
+    tps = list(_STATE.timepoint_names)
+    if tp not in tps:
+        return [tp]
+    i = tps.index(tp)
+    seen_before = any(
+        str((pos_map.get(t) or {}).get("spine_id") or "").strip() for t in tps[:i]
+    )
+    return tps[i:] if seen_before else [tp]
+
+
 def _drop_unavailable_from_open_panels() -> None:
     """After a new OOF / ignore, the open lineage must not keep a spine that is
-    no longer in the pool: clear it (keep the coordinate focus)."""
+    no longer in the pool. It is cleared like a Clear click at that timepoint
+    (coordinate focus kept), so a later part of the lineage is cleared too."""
     for attr in ("positions", "positions_b"):
         pos_map = getattr(_STATE, attr, None) or {}
-        changed = False
-        for tp, pos in list(pos_map.items()):
-            sid = str((pos or {}).get("spine_id") or "")
-            if sid and _is_unavailable_for_matching(tp, sid):
-                pos = dict(pos)
-                pos["spine_id"] = None
-                pos["fate"] = None
-                pos["source"] = "oof_region"
-                pos_map[tp] = pos
-                changed = True
-        if changed:
-            setattr(_STATE, attr, _apply_fate_rules(pos_map))
+        hit = [
+            tp for tp in _STATE.timepoint_names
+            if str((pos_map.get(tp) or {}).get("spine_id") or "")
+            and _is_unavailable_for_matching(tp, str(pos_map[tp]["spine_id"]))
+        ]
+        if not hit:
+            continue
+        for t in _timepoints_to_clear(pos_map, hit[0]):
+            if t not in pos_map:
+                continue
+            pos = dict(pos_map[t])
+            pos["spine_id"] = None
+            pos["fate"] = None
+            pos["source"] = "oof_region" if t == hit[0] else "cleared"
+            pos_map[t] = pos
+        setattr(_STATE, attr, _apply_fate_rules(pos_map))
 
 
 def _is_spine_ignored(tp: str, spine_id: str) -> bool:
@@ -2821,19 +2841,12 @@ def clear_tp(req: ClearTpRequest) -> SelectSpineResponse:
         if tp not in pos_map and tp not in _STATE.positions:
             raise ValueError(f"Timepoint '{tp}' not active.")
         tps = list(_STATE.timepoint_names)
-        to_clear = [tp]
-        # Lineage mode: clearing a timepoint after the spine has appeared means
-        # it disappeared there, so every later timepoint is cleared too (a
-        # lineage is never split; Save then infers LOST at tp). Clearing before
-        # the first match only moves the start (NEW is inferred later).
         # Timepoint mode clears the anchor timepoint only.
-        if _STATE.review_mode == REVIEW_MODE_LINEAGE and tp in tps:
-            i = tps.index(tp)
-            seen_before = any(
-                str((pos_map.get(t) or {}).get("spine_id") or "").strip() for t in tps[:i]
-            )
-            if seen_before:
-                to_clear = tps[i:]
+        to_clear = (
+            _timepoints_to_clear(pos_map, tp)
+            if _STATE.review_mode == REVIEW_MODE_LINEAGE
+            else [tp]
+        )
         for t in to_clear:
             if t not in pos_map and t != tp:
                 continue
