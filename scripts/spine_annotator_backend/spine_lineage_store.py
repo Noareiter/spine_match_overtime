@@ -119,27 +119,6 @@ def all_other_timepoints_cleared(
 
 
 
-def _is_observed_match(td: dict) -> bool:
-    """Positively matched spine (not inferred / censored)."""
-    if _is_blind_spot(td) or _is_false_positive_mark(td):
-        return False
-    fate = str(td.get("fate") or "").strip().lower()
-    if fate in ("lost", "artifact", "ignore"):
-        return False
-    sid = str(td.get("spine_id") or "").strip()
-    if not sid or sid.startswith("artifact_"):
-        return False
-    src = str(td.get("source") or "").strip().lower()
-    if src in ("false_positive_removed", "false_positive_bridged"):
-        return False
-    return True
-
-
-def _lineage_continuous_present(td: dict) -> bool:
-    """Present for survival / lifespan / event continuity."""
-    return _is_observed_match(td)
-
-
 def _tp_is_present(td: dict) -> bool:
     """Spine was matched at this timepoint."""
     if _is_blind_spot(td) or _is_false_positive_mark(td):
@@ -384,9 +363,8 @@ def _apply_current_rules(lin: dict) -> dict:
     out["per_tp"] = {tp: dict(finalized.get(tp) or {}) for tp in tps}
     out["first_seen_tp"] = first_seen
     out["last_seen_tp"] = last_seen
-    out["censored_from_tp"] = ""
-    out["right_censored"] = False
-    out.pop("ignore_after_tp", None)
+    for stale in ("censored_from_tp", "right_censored", "ignore_after_tp"):
+        out.pop(stale, None)
     return out
 
 
@@ -458,7 +436,7 @@ def save_decision(
     )
     if shape_error:
         raise ValueError(shape_error)
-    finalized, last_seen_tp, disappeared_at_tp, censored_from_tp, right_censored = (
+    finalized, last_seen_tp, disappeared_at_tp, _, _ = (
         _finalize_lineage_per_tp(
         per_tp,
         timepoint_names,
@@ -498,8 +476,6 @@ def save_decision(
             "first_seen_tp": "",
             "last_seen_tp": "",
             "lost_inferred": False,
-            "censored_from_tp": "",
-            "right_censored": False,
             "deleted": True,
         }
 
@@ -510,8 +486,6 @@ def save_decision(
         "timepoint_names": list(timepoint_names),
         "first_seen_tp": first_seen_tp,
         "last_seen_tp": last_seen_tp,
-        "censored_from_tp": censored_from_tp,
-        "right_censored": right_censored,
         "per_tp": {tp: dict(finalized.get(tp) or {}) for tp in timepoint_names},
     }
     replaced = False
@@ -549,8 +523,6 @@ def save_decision(
         "first_seen_tp": first_seen_tp,
         "last_seen_tp": last_seen_tp,
         "lost_inferred": bool(disappeared_at_tp),
-        "censored_from_tp": censored_from_tp,
-        "right_censored": right_censored,
         "deleted": False,
     }
 
@@ -734,112 +706,6 @@ def _status_for_tp(tp_data: dict) -> str:
     return "absent"
 
 
-def _event_present_state(td: dict) -> bool:
-    """Observed match for strict event anchoring."""
-    return _is_observed_match(td)
-
-
-def _event_continuous_state(td: dict) -> bool:
-    """Continuous lineage presence for survival / lifespan."""
-    return _lineage_continuous_present(td)
-
-
-def _event_clear_state(td: dict) -> bool:
-    """Clear for event inference: unmarked gap only (censored blind spots are not clear)."""
-    return _tp_is_unmarked_gap(td)
-
-
-def _tp_is_absent_tail(td: dict) -> bool:
-    """Absent after last continuous observation (clear or inferred lost)."""
-    if _tp_is_censored(td) or _lineage_continuous_present(td):
-        return False
-    fate = str(td.get("fate") or "").strip().lower()
-    if fate == "lost" and is_local_decision(td):
-        return False
-    return _tp_is_unmarked_gap(td) or fate == "lost"
-
-
-def _derive_events_and_lifecycle(
-    timepoint_names: List[str],
-    per_tp: Dict[str, dict],
-) -> tuple[Dict[str, str], str, str, str]:
-    """Derive formation/loss events and lineage lifecycle from per-timepoint states."""
-    events: Dict[str, str] = {tp: "" for tp in timepoint_names}
-    if not timepoint_names:
-        return events, "", "", "unclassified"
-
-    continuous = [_event_continuous_state(per_tp.get(tp) or {}) for tp in timepoint_names]
-    observed = [_event_present_state(per_tp.get(tp) or {}) for tp in timepoint_names]
-    clear = [_event_clear_state(per_tp.get(tp) or {}) for tp in timepoint_names]
-    censored = [_tp_is_censored(per_tp.get(tp) or {}) for tp in timepoint_names]
-
-    formation_idx: Optional[int] = None
-    for i in range(1, len(timepoint_names)):
-        if observed[i] and not continuous[i - 1] and clear[i - 1]:
-            formation_idx = i
-            break
-    formation_tp = timepoint_names[formation_idx] if formation_idx is not None else ""
-    if formation_tp:
-        prior = events.get(formation_tp, "")
-        events[formation_tp] = (
-            f"{prior};appeared_at_{formation_tp}" if prior else f"appeared_at_{formation_tp}"
-        )
-
-    termination_idx: Optional[int] = None
-    for y in range(len(timepoint_names) - 1):
-        if not continuous[y]:
-            continue
-        if all(
-            _tp_is_absent_tail(per_tp.get(timepoint_names[k]) or {})
-            for k in range(y + 1, len(timepoint_names))
-        ):
-            if any(censored[k] for k in range(y + 1, len(timepoint_names))):
-                continue
-            termination_idx = y
-    # The loss event sits on the LOST timepoint: the first one after the last match.
-    termination_tp = timepoint_names[termination_idx + 1] if termination_idx is not None else ""
-    if termination_tp:
-        current = events.get(termination_tp, "")
-        events[termination_tp] = (
-            f"{current};lost_at_{termination_tp}" if current else f"lost_at_{termination_tp}"
-        )
-
-    if all(continuous):
-        lifecycle = "stable"
-    elif any(censored) and termination_idx is None:
-        lifecycle = "right_censored" if censored[-1] else "censored_interval"
-    else:
-        is_transient = (
-            formation_idx is not None
-            and termination_idx is not None
-            and formation_idx <= termination_idx
-            and (termination_idx - formation_idx + 1) < len(timepoint_names)
-        )
-        if is_transient:
-            lifecycle = "transient"
-        elif formation_idx is not None or termination_idx is not None:
-            lifecycle = "persistent_engram"
-        else:
-            lifecycle = "unclassified"
-    return events, formation_tp, termination_tp, lifecycle
-
-
-def _fate_for_tp(tp_data: dict) -> str:
-    src = str(tp_data.get("source") or "").strip().lower()
-    if src == "false_positive_artifact":
-        return "false_positive_artifact"
-    if src == "false_positive_ignore":
-        return "false_positive_ignore"
-    if src in ("false_positive_removed",):
-        return "false_positive_artifact"
-    fate = str(tp_data.get("fate") or "").strip().lower()
-    if fate:
-        return fate
-    if src == "blind_spot_artifact":
-        return "artifact"
-    return ""
-
-
 def _ordered_union_timepoints(lineages: List[dict]) -> List[str]:
     from . import animal_config
 
@@ -880,36 +746,17 @@ def _derive_lineage_summary(
     return timepoint_names[first], timepoint_names[last], "", False
 
 
-def _lineage_summary_fields(lineage: dict, per_tp: Dict[str, dict], timepoint_names: List[str]) -> tuple[str, str, str, bool]:
-    """Prefer recomputed summary; fall back to stored fields for legacy JSON."""
-    first_seen, last_seen, censored_from, right_censored = _derive_lineage_summary(
-        per_tp, timepoint_names
-    )
-    if not first_seen:
-        first_seen = str(lineage.get("first_seen_tp", "") or "")
-    if not last_seen:
-        last_seen = str(lineage.get("last_seen_tp", "") or "")
-    if not censored_from:
-        censored_from = str(lineage.get("censored_from_tp", "") or "")
-        if not censored_from and lineage.get("ignore_after_tp"):
-            anchor = str(lineage.get("ignore_after_tp") or "")
-            if anchor in timepoint_names:
-                anchor_i = timepoint_names.index(anchor)
-                if anchor_i + 1 < len(timepoint_names):
-                    censored_from = timepoint_names[anchor_i + 1]
-    if not right_censored:
-        right_censored = bool(lineage.get("right_censored"))
-    return first_seen, last_seen, censored_from, right_censored
+def _lineage_summary_fields(lineage: dict, per_tp: Dict[str, dict], timepoint_names: List[str]) -> tuple[str, str]:
+    """first_seen_tp / last_seen_tp, recomputed from per_tp."""
+    first_seen, last_seen, _, _ = _derive_lineage_summary(per_tp, timepoint_names)
+    return first_seen, last_seen
 
 
 def _registry_header(timepoint_names: List[str]) -> List[str]:
-    # Survival-analysis / interpretation fields (event_<tp>, formation_tp,
-    # lifecycle, right_censored, censored_from_tp, n_timepoints_seen,
-    # n_timepoints_continuous, active_timepoints) are derived classifications,
-    # not observations -- reconstruct them with postprocess_registry.py instead
-    # of reading them from this file. first_seen_tp/last_seen_tp stay: they're
-    # cheap summaries used elsewhere (not raw per-TP observations, but not an
-    # interpretation of what happened either).
+    # One status column per timepoint (matched / new / lost / absent); x/y/z
+    # only where a spine was observed. Morphology per observation lives in
+    # spine_observations_long.csv. Interpretation (events, lifecycle) belongs
+    # to the analysis, not this file (outputs review 2026-10).
     header = [
         "animal_id",
         "fov",
@@ -923,8 +770,6 @@ def _registry_header(timepoint_names: List[str]) -> List[str]:
     header += [f"id_{tp}" for tp in timepoint_names]
     header += [f"local_id_{tp}" for tp in timepoint_names]
     header += [f"status_{tp}" for tp in timepoint_names]
-    header += [f"fate_{tp}" for tp in timepoint_names]
-    header += [f"artifact_mode_{tp}" for tp in timepoint_names]
     header += [f"{tp}_x" for tp in timepoint_names]
     header += [f"{tp}_y" for tp in timepoint_names]
     header += [f"{tp}_z" for tp in timepoint_names]
@@ -941,7 +786,7 @@ def _build_registry_row(
     lineage_key = str(lineage.get("lineage_key") or pre_id or "")
     per_tp = dict(lineage.get("per_tp") or {})
     row_tps = list(lineage.get("timepoint_names") or timepoint_names)
-    first_seen_tp, last_seen_tp, _censored_from_tp, _right_censored = _lineage_summary_fields(
+    first_seen_tp, last_seen_tp = _lineage_summary_fields(
         lineage, per_tp, row_tps
     )
     row: Dict[str, str] = {
@@ -962,11 +807,10 @@ def _build_registry_row(
         row[f"id_{tp}"] = sid if tp in per_tp else ""
         row[f"local_id_{tp}"] = local_sid if tp in per_tp else ""
         row[f"status_{tp}"] = status
-        row[f"fate_{tp}"] = _fate_for_tp(td) if tp in per_tp else ""
-        row[f"artifact_mode_{tp}"] = _artifact_mode(td) if tp in per_tp else ""
-        row[f"{tp}_x"] = str(td.get("x", "")) if tp in per_tp and td.get("x") is not None else ""
-        row[f"{tp}_y"] = str(td.get("y", "")) if tp in per_tp and td.get("y") is not None else ""
-        row[f"{tp}_z"] = str(td.get("z", "")) if tp in per_tp and td.get("z") is not None else ""
+        observed = status in ("matched", "new", "manual")
+        for axis in ("x", "y", "z"):
+            val = td.get(axis)
+            row[f"{tp}_{axis}"] = str(val) if observed and val is not None else ""
     return row
 
 
@@ -992,6 +836,17 @@ def rebuild_registry_wide(
         writer.writeheader()
         for row in rows:
             writer.writerow({k: row.get(k, "") for k in header})
+    from . import observations_store
+
+    observations_store.rebuild_observations_long(
+        respan,
+        fov,
+        animal_id=aid,
+        lineages=lineages,
+        timepoint_names=timepoint_names,
+        out_dir=meta["dir"],
+        status_for_tp=_status_for_tp,
+    )
     return meta["registry"]
 
 

@@ -12,7 +12,6 @@ from . import animal_config, dendrite_link_store
 
 INVENTORY_FILENAME = "fov_inventory.csv"
 INVENTORY_COLUMNS = [
-    "row_type",
     "animal_id",
     "fov",
     "timepoint",
@@ -23,9 +22,6 @@ INVENTORY_COLUMNS = [
     "dendrite_ids",
     "missing",
     "active",
-    "t1_timepoint",
-    "t2_timepoint",
-    "pair_label",
 ]
 
 _DETECTED_SPINES_RE = re.compile(r"^fov(\d+).*detected_spines.*\.csv$", re.IGNORECASE)
@@ -238,10 +234,8 @@ def write_fov_inventory_csv(
     all_rows: List[TimepointFiles],
     active_set: set[str],
 ) -> Path:
-    """Document every discovered timepoint (not just the active subset) plus
-    the resolved workflow pairs, so the on-disk record matches what the app
-    actually saw at load time, regardless of which timepoints are selected.
-    """
+    """One row per configured timepoint folder: files found, spine count,
+    dendrite ids, what is missing, and whether it is selected."""
     path = inventory_path(Path(inv.respan_root), inv.fov)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8-sig") as fh:
@@ -250,7 +244,6 @@ def write_fov_inventory_csv(
         for row in all_rows:
             writer.writerow(
                 {
-                    "row_type": "timepoint",
                     "animal_id": inv.animal_id,
                     "fov": inv.fov,
                     "timepoint": row.name,
@@ -261,17 +254,6 @@ def write_fov_inventory_csv(
                     "dendrite_ids": ";".join(row.dendrite_ids),
                     "missing": ";".join(row.missing),
                     "active": row.name in active_set,
-                }
-            )
-        for pair in inv.workflow_pairs:
-            writer.writerow(
-                {
-                    "row_type": "workflow_pair",
-                    "animal_id": inv.animal_id,
-                    "fov": inv.fov,
-                    "t1_timepoint": pair.get("t1_timepoint", ""),
-                    "t2_timepoint": pair.get("t2_timepoint", ""),
-                    "pair_label": pair.get("label", ""),
                 }
             )
     return path

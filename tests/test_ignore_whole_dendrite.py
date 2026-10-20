@@ -1,7 +1,7 @@
 """
 Feature test: ignoring a whole dendrite in the Phase 0 dendrite-link step
 excludes every spine on it from any match candidacy, and lists them in the
-merged ignored_spines.csv under source "dendrite".
+merged excluded_spines.csv under reason "dendrite_ignore".
 
 Covers:
   - POST /mtp/ignore-dendrite persists the (timepoint, dendrite_id) pair and
@@ -11,7 +11,7 @@ Covers:
     next-best free candidate.
   - Manual override (/mtp/viewer/set-spine) is hard-blocked for an ignored
     spine, not just skipped by ranking.
-  - results_final_store._ignored_spine_rows_for_fov lists the ignored
+  - results_final_store._excluded_spine_rows_for_fov lists the ignored
     dendrite's spines with source "dendrite".
 
 Uses a small synthetic 2-timepoint fixture (no external repo dependency).
@@ -141,10 +141,10 @@ class TestIgnoreWholeDendrite(unittest.TestCase):
         # "dendrite".
         from spine_annotator_backend import results_final_store
 
-        ignore_rows = results_final_store._ignored_spine_rows_for_fov(
+        ignore_rows = results_final_store._excluded_spine_rows_for_fov(
             self.respan, 1, "TESTANIMAL"
         )
-        dendrite_rows = [row for row in ignore_rows if row["source"] == "dendrite"]
+        dendrite_rows = [row for row in ignore_rows if row["reason"] == "dendrite_ignore"]
         local_ids = sorted(row["local_spine_id"] for row in dendrite_rows)
         self.assertEqual(local_ids, ["15", "16"])
 

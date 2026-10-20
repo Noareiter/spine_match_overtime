@@ -28,9 +28,6 @@ DISPOSITION_QC_ARTIFACT = "qc_artifact"
 DISPOSITION_DENDRITE_IGNORE = "dendrite_ignore"
 DISPOSITION_LINEAGE_MATCHED = "lineage_matched"
 DISPOSITION_LINEAGE_NEW = "lineage_new"
-DISPOSITION_LINEAGE_LOST = "lineage_lost"
-DISPOSITION_LINEAGE_IGNORE = "lineage_ignore"
-DISPOSITION_LINEAGE_ARTIFACT = "lineage_artifact"
 DISPOSITION_RESOLVED = "duplicate_resolved"
 
 
@@ -274,21 +271,18 @@ def positions_from_lineage(
     return out
 
 
-def _disposition_from_status(status: str, fate: str) -> str:
+def _disposition_from_status(status: str, fate: str = "") -> str:
+    """Disposition of a detection held by a lineage at that timepoint.
+
+    Only NEW and matched are possible: LOST / ABSENT timepoints hold no
+    detection, and IGNORE / ARTIFACT are Timepoint-mode tags (qc_ignore /
+    qc_artifact), never lineage fates (rules review 2026-10).
+    """
     st = str(status or "").strip().lower()
-    ft = str(fate or "").strip().lower()
-    if st in ("ignored",) or ft == "ignore":
-        return DISPOSITION_LINEAGE_IGNORE
-    if st in ("artifact",) or ft == "artifact":
-        return DISPOSITION_LINEAGE_ARTIFACT
-    if st in ("lost",) or ft == "lost":
-        return DISPOSITION_LINEAGE_LOST
-    if st in ("new",) or ft == "new":
+    if st == "new":
         return DISPOSITION_LINEAGE_NEW
-    if st in ("matched", "manual", "stable"):
+    if st in ("matched", "manual"):
         return DISPOSITION_LINEAGE_MATCHED
-    if st == "single_tp_only" and ft == "ignore":
-        return DISPOSITION_LINEAGE_IGNORE
     return ""
 
 
@@ -347,7 +341,6 @@ def build_disposition_rows(
         lineage_key = ""
         status = ""
         fate = ""
-        event = ""
         conflict = "no"
         reviewed = "no"
 
@@ -418,9 +411,6 @@ def build_disposition_rows(
                 "local_spine_id": str(cat.get("local_spine_id") or ""),
                 "disposition": disposition,
                 "lineage_key": lineage_key,
-                "status": status,
-                "fate": fate,
-                "event": event,
                 "conflict": conflict,
                 "reviewed": reviewed,
             }
@@ -464,9 +454,6 @@ def rebuild_spine_disposition(
         "local_spine_id",
         "disposition",
         "lineage_key",
-        "status",
-        "fate",
-        "event",
         "conflict",
         "reviewed",
     ]
@@ -583,9 +570,6 @@ def coverage_and_unreviewed(
         "local_spine_id",
         "disposition",
         "lineage_key",
-        "status",
-        "fate",
-        "event",
         "conflict",
         "reviewed",
     ]
@@ -685,8 +669,8 @@ def apply_conflict_resolution(
             continue
         lin["per_tp"] = {tp: dict(finalized.get(tp) or {}) for tp in timepoint_names}
         lin["last_seen_tp"] = last_seen
-        lin["censored_from_tp"] = censored
-        lin["right_censored"] = rc
+        for stale in ("censored_from_tp", "right_censored"):
+            lin.pop(stale, None)
         updated.append(row_key)
 
     if removed:

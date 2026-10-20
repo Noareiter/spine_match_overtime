@@ -437,7 +437,7 @@ def clear_links() -> StateResponse:
 @router.post("/ignore-dendrite", response_model=StateResponse)
 def ignore_dendrite(req: IgnoreDendriteRequest) -> StateResponse:
     """Ignore every spine on this dendrite at this timepoint: excluded from
-    any match candidacy and listed in the merged ignored_spines.csv."""
+    any match candidacy and listed in the merged excluded_spines.csv."""
     try:
         if req.timepoint not in _STATE.timepoint_names:
             raise ValueError(f"Timepoint '{req.timepoint}' is not loaded.")
@@ -753,7 +753,7 @@ _PAGE_HTML = """<!doctype html>
       <button onclick="saveLinks()">Save links</button>
       <button class="danger ghost" onclick="clearLinks()">Clear all links</button>
     </div>
-    <div class="hint">Ignoring a dendrite excludes every spine on it from any match candidacy at that timepoint, and lists them in the merged ignored_spines.csv. Dendrite ids are per-timepoint — select the same dendrite's checkbox in another timepoint's column too if it should be ignored there as well.</div>
+    <div class="hint">Ignoring a dendrite excludes every spine on it from any match candidacy at that timepoint, and lists them in the merged excluded_spines.csv. Dendrite ids are per-timepoint — select the same dendrite's checkbox in another timepoint's column too if it should be ignored there as well.</div>
     <div class="columns" id="columns"></div>
   </div>
   </details>

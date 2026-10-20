@@ -3106,20 +3106,8 @@ def _complete_review_save(
         "phase_advanced": bool(phase_adv),
         "last_seen_tp": save_info.get("last_seen_tp", ""),
         "lost_inferred": bool(save_info.get("lost_inferred")),
-        "censored_from_tp": save_info.get("censored_from_tp", ""),
-        "right_censored": bool(save_info.get("right_censored")),
     }
-    if save_info.get("right_censored"):
-        out["inference_message"] = (
-            f"Right-censored from {save_info.get('censored_from_tp') or 'final TP'} "
-            f"(last seen at {save_info.get('last_seen_tp') or '?'} — not classified as lost)."
-        )
-    elif save_info.get("censored_from_tp"):
-        out["inference_message"] = (
-            f"Censored from {save_info['censored_from_tp']} "
-            f"(last seen at {save_info.get('last_seen_tp') or '?'} — loss not inferred)."
-        )
-    elif save_info.get("lost_inferred"):
+    if save_info.get("lost_inferred"):
         out["inference_message"] = (
             f"Lost after {save_info.get('last_seen_tp') or '?'} "
             f"(not seen in later timepoints)."

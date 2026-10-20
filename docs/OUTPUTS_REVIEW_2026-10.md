@@ -1,6 +1,6 @@
 # Outputs review — October 2026
 
-Decisions taken one by one with the user; implement together after the review.
+Decisions taken one by one with the user (2026-10-20). **Implemented** on branch `cleanup/single-version`.
 Scope: what the current code writes for **new** data. Legacy files on disk are out of scope.
 
 ## Decisions

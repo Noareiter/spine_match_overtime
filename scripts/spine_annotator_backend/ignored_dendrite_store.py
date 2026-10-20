@@ -3,7 +3,7 @@
 Ignoring a dendrite (in the Phase 0 dendrite-link step) means every spine
 currently sitting on that dendrite at that timepoint is excluded from any
 match candidacy — never suggested/ranked as a candidate, never offered in
-the orphan-review queue — and is listed in the merged ignored_spines.csv
+the orphan-review queue — and is listed in the merged excluded_spines.csv
 under source "dendrite".
 
 Unlike ignored_spine_store (a snapshot list of specific spine ids), this

@@ -27,6 +27,7 @@ MANIFEST_FILENAME = "build_manifest.json"
 _MERGE_CSV_NAMES = (
     "spine_disposition.csv",
     "spine_catalog.csv",
+    "spine_observations_long.csv",
 )
 
 # Wide-format files with one column block per timepoint. These need the
@@ -48,8 +49,6 @@ _REGISTRY_TP_COLUMN_TEMPLATES = (
     "id_{tp}",
     "local_id_{tp}",
     "status_{tp}",
-    "fate_{tp}",
-    "artifact_mode_{tp}",
     "{tp}_x",
     "{tp}_y",
     "{tp}_z",
@@ -57,24 +56,14 @@ _REGISTRY_TP_COLUMN_TEMPLATES = (
 _DENDRITE_LINKS_FIXED_COLUMNS = ("animal_id", "fov", "link_id")
 _DENDRITE_LINKS_TP_COLUMN_TEMPLATES = ("dendrite_id_{tp}",)
 
-IGNORED_MERGED_FILENAME = "ignored_spines.csv"
-ARTIFACT_MERGED_FILENAME = "artifact_spines.csv"
-ARTIFACT_COLUMNS = (
+EXCLUDED_MERGED_FILENAME = "excluded_spines.csv"
+EXCLUDED_COLUMNS = (
     "animal_id",
     "fov",
     "timepoint",
     "global_spine_id",
     "local_spine_id",
-    "source",
-)
-IGNORED_COLUMNS = (
-    "animal_id",
-    "fov",
-    "timepoint",
-    "global_spine_id",
-    "local_spine_id",
-    "lineage_key",
-    "source",
+    "reason",
 )
 
 _COPY_JSON_NAMES = (
@@ -248,44 +237,43 @@ def _merge_wide_csv_by_timepoint(
     return len(all_rows)
 
 
-def _ignored_spine_rows_for_fov(respan: Path, fov: int, animal_id: str) -> List[dict]:
-    """Union every 'ignore' source for one FOV into flat rows.
+def _excluded_spine_rows_for_fov(respan: Path, fov: int, animal_id: str) -> List[dict]:
+    """Every detection taken out of the matching work for one FOV, with why.
 
-    Four independent sources, each a genuinely different action:
-    - oof: spine falls inside a drawn out-of-frame region (ignored_spines.json)
-    - qc_tag: manually tagged ignore via Timepoint mode / bulk Tab->I
-      (spine_qc_tags.json)
-    - lineage_fate: a timepoint within a lineage was marked fate="ignore"
-      (lineage_decisions.json) -- there is no detection at that timepoint by
-      definition (the match must be cleared before fate can be set), so
-      global_spine_id/local_spine_id are left empty and lineage_key
-      identifies which lineage's timepoint-gap this is instead.
-    - dendrite: every spine currently on a dendrite ignored via the Phase 0
-      dendrite-link step (ignored_dendrites.json) - resolved live against the
-      catalog, so a spine added to that dendrite later is covered too.
+    reason:
+    - artifact: Timepoint-mode A tag (spine_qc_tags.json) — not a spine
+    - ignore: Timepoint-mode I tag (spine_qc_tags.json)
+    - oof: inside an OOF shape drawn on that timepoint (ignored_spines.json)
+    - dendrite_ignore: on a dendrite ignored in Phase 0 (ignored_dendrites.json),
+      resolved live against the catalog
+
+    A detection can appear under more than one reason.
     """
     catalog = spine_catalog_store.load_catalog(respan, fov)
 
-    def _local_id(gid: str) -> str:
-        if not catalog:
-            return ""
-        row = catalog.by_global.get(str(gid))
-        return str(row.get("local_spine_id") or "") if row else ""
+    def _row(tp: str, gid: str, reason: str) -> dict:
+        local = ""
+        if catalog:
+            cat_row = catalog.by_global.get(str(gid))
+            local = str(cat_row.get("local_spine_id") or "") if cat_row else ""
+        return {
+            "animal_id": animal_id,
+            "fov": str(fov),
+            "timepoint": tp,
+            "global_spine_id": gid,
+            "local_spine_id": local,
+            "reason": reason,
+        }
 
     rows: List[dict] = []
+    for tp, tagmap in sorted(spine_qc_tag_store.load_tags(respan, fov).items()):
+        for gid, tag in sorted(tagmap.items()):
+            if tag in ("artifact", "ignore") and str(gid).strip():
+                rows.append(_row(tp, gid, tag))
 
-    by_tp_oof = ignored_spine_store.load_ignored(respan, fov)
-    for tp, ids in sorted(by_tp_oof.items()):
+    for tp, ids in sorted(ignored_spine_store.load_ignored(respan, fov).items()):
         for gid in sorted(ids):
-            rows.append({
-                "animal_id": animal_id,
-                "fov": str(fov),
-                "timepoint": tp,
-                "global_spine_id": gid,
-                "local_spine_id": _local_id(gid),
-                "lineage_key": "",
-                "source": "oof",
-            })
+            rows.append(_row(tp, gid, "oof"))
 
     by_tp_dendrite = ignored_dendrite_store.load_ignored_dendrites(respan, fov)
     for tp, dendrite_ids in sorted(by_tp_dendrite.items()):
@@ -295,82 +283,12 @@ def _ignored_spine_rows_for_fov(respan: Path, fov: int, animal_id: str) -> List[
             by_tp_dendrite, tp, catalog.lookup_for_timepoint(tp)
         )
         for gid in sorted(spine_ids):
-            rows.append({
-                "animal_id": animal_id,
-                "fov": str(fov),
-                "timepoint": tp,
-                "global_spine_id": gid,
-                "local_spine_id": _local_id(gid),
-                "lineage_key": "",
-                "source": "dendrite",
-            })
-
-    qc_tags = spine_qc_tag_store.load_tags(respan, fov)
-    for tp, tagmap in sorted(qc_tags.items()):
-        for gid, tag in sorted(tagmap.items()):
-            if tag != "ignore" or not str(gid).strip():
-                continue
-            rows.append({
-                "animal_id": animal_id,
-                "fov": str(fov),
-                "timepoint": tp,
-                "global_spine_id": gid,
-                "local_spine_id": _local_id(gid),
-                "lineage_key": "",
-                "source": "qc_tag",
-            })
-
-    decisions = spine_lineage_store.load_decisions(respan, fov)
-    for lin in decisions.get("lineages") or []:
-        lineage_key = str(lin.get("lineage_key") or lin.get("pre_spine_id") or "").strip()
-        per_tp = lin.get("per_tp") or {}
-        for tp, td in sorted(per_tp.items()):
-            if str((td or {}).get("fate") or "").strip().lower() != "ignore":
-                continue
-            rows.append({
-                "animal_id": animal_id,
-                "fov": str(fov),
-                "timepoint": tp,
-                "global_spine_id": "",
-                "local_spine_id": "",
-                "lineage_key": lineage_key,
-                "source": "lineage_fate",
-            })
+            rows.append(_row(tp, gid, "dendrite_ignore"))
 
     return rows
 
 
-def _artifact_spine_rows_for_fov(respan: Path, fov: int, animal_id: str) -> List[dict]:
-    """Manually tagged artifacts (Timepoint mode A key, spine_qc_tags.json).
-
-    Each row is one detection at one timepoint judged a false positive. These
-    are independent of lineages, so they are not in spine_registry_wide.csv.
-    """
-    catalog = spine_catalog_store.load_catalog(respan, fov)
-
-    def _local_id(gid: str) -> str:
-        if not catalog:
-            return ""
-        row = catalog.by_global.get(str(gid))
-        return str(row.get("local_spine_id") or "") if row else ""
-
-    rows: List[dict] = []
-    for tp, tagmap in sorted(spine_qc_tag_store.load_tags(respan, fov).items()):
-        for gid, tag in sorted(tagmap.items()):
-            if tag != "artifact" or not str(gid).strip():
-                continue
-            rows.append({
-                "animal_id": animal_id,
-                "fov": str(fov),
-                "timepoint": tp,
-                "global_spine_id": gid,
-                "local_spine_id": _local_id(gid),
-                "source": "qc_tag",
-            })
-    return rows
-
-
-def _merge_artifact_spines(
+def _merge_excluded_spines(
     target_fovs: List[int],
     respan: Path,
     animal_id: str,
@@ -378,35 +296,15 @@ def _merge_artifact_spines(
 ) -> int:
     all_rows: List[dict] = []
     for fov in target_fovs:
-        all_rows.extend(_artifact_spine_rows_for_fov(respan, fov, animal_id))
+        all_rows.extend(_excluded_spine_rows_for_fov(respan, fov, animal_id))
     if not all_rows:
         return 0
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", newline="", encoding="utf-8") as fh:
-        writer = csv.DictWriter(fh, fieldnames=list(ARTIFACT_COLUMNS), extrasaction="ignore")
+        writer = csv.DictWriter(fh, fieldnames=list(EXCLUDED_COLUMNS), extrasaction="ignore")
         writer.writeheader()
         for row in all_rows:
-            writer.writerow({k: row.get(k, "") for k in ARTIFACT_COLUMNS})
-    return len(all_rows)
-
-
-def _merge_ignored_spines(
-    target_fovs: List[int],
-    respan: Path,
-    animal_id: str,
-    out_path: Path,
-) -> int:
-    all_rows: List[dict] = []
-    for fov in target_fovs:
-        all_rows.extend(_ignored_spine_rows_for_fov(respan, fov, animal_id))
-    if not all_rows:
-        return 0
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with out_path.open("w", newline="", encoding="utf-8") as fh:
-        writer = csv.DictWriter(fh, fieldnames=list(IGNORED_COLUMNS), extrasaction="ignore")
-        writer.writeheader()
-        for row in all_rows:
-            writer.writerow({k: row.get(k, "") for k in IGNORED_COLUMNS})
+            writer.writerow({k: row.get(k, "") for k in EXCLUDED_COLUMNS})
     return len(all_rows)
 
 
@@ -466,17 +364,11 @@ def build_results_final(
         if count:
             merged_counts[name] = count
 
-    ignored_count = _merge_ignored_spines(
-        target_fovs, respan, cfg.animal_id, out_dir / IGNORED_MERGED_FILENAME
+    excluded_count = _merge_excluded_spines(
+        target_fovs, respan, cfg.animal_id, out_dir / EXCLUDED_MERGED_FILENAME
     )
-    if ignored_count:
-        merged_counts[IGNORED_MERGED_FILENAME] = ignored_count
-
-    artifact_count = _merge_artifact_spines(
-        target_fovs, respan, cfg.animal_id, out_dir / ARTIFACT_MERGED_FILENAME
-    )
-    if artifact_count:
-        merged_counts[ARTIFACT_MERGED_FILENAME] = artifact_count
+    if excluded_count:
+        merged_counts[EXCLUDED_MERGED_FILENAME] = excluded_count
 
     for fov in target_fovs:
         meta = dendrite_link_store.annotator_meta_dir(respan, fov)

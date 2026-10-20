@@ -122,25 +122,27 @@ SPINE MATCH OVERTIME — איך לעבוד
 4. קבצי פלט ומשמעותם
 ================================================================================
 
-  spine_registry_wide.csv — טבלה רחבה, שורה לכל lineage:
-  • lineage_id — מזהה lineage ייחודי
-  • anchor_timepoint — TP הראשון שבו ה-spine כן וודוק
-  • first_seen_tp — נוכחות ראשונה (אחרי anchor)
-  • last_seen_tp  — נוכחות אחרונה
-  • pre_spine_id, mid_spine_id, end_spine_id — S_XXXXX בכל TP
-  • status_<tp> — matched | new | artifact | ignore | absent | censored
-  • fate_<tp> — LOST | NEW | ARTIFACT | IGNORE | CENSORED (בטוח)
-  • artifact_mode_<tp> — blind_spot | false_positive (אם artifact)
+  spine_registry_wide.csv — טבלה רחבה, שורה לכל שושלת:
+  • lineage_id / lineage_key — מזהה השושלת
+  • first_seen_tp, last_seen_tp — הופעה ראשונה ואחרונה
+  • id_<tp>, local_id_<tp> — מזהה הספיין בכל נקודת זמן (ריק אם אין)
+  • status_<tp> — matched | new | lost | absent (| manual לספיין שהוסף ידנית)
+  • <tp>_x/_y/_z — רק בנקודות שבהן נצפה ספיין; ריק ב-absent ו-lost
 
-  lineage_decisions.json — פירוט מלא per_tp (קואורדינטות, source, fate).
+  spine_observations_long.csv — שורה לכל שושלת × נקודת זמן, עם הסטטוס
+  וכל 38 המדדים מ-RESPAN (נפח, אורך, ראש, צוואר, עוצמה, מרחק מהסומה).
+  ריק ב-absent / lost. נוח לניתוח ב-Python / R.
 
-  duplicate_resolutions.json — קונפליקטים שונגו:
-  • lineage_a, lineage_b — ה-lineages שהתנגשו
-  • kept_lineage — איזו נשמרה
-  • blast_radius_lost — truncates | dissolves (איך ההפסד השפיע)
+  spine_disposition.csv — שורה לכל זיהוי: disposition (lineage_matched,
+  lineage_new, qc_artifact, qc_ignore, pool_ignore, dendrite_ignore,
+  duplicate_*, unreviewed), lineage_key, conflict, reviewed.
 
-  הערה: שדות נגזרים (lifecycle, event_<tp>, וכו') עובדים post-processing.
-  רוצה אותם? הריצו: postprocess_registry.py
+  Results final/excluded_spines.csv — כל זיהוי שהוצא מהעבודה, עם reason:
+  artifact | ignore | oof | dendrite_ignore.
+
+  lineage_decisions.json — מקור האמת: מה נבחר בכל נקודת זמן.
+
+  duplicate_resolutions.json — קונפליקטים שנפתרו.
 
   פירוט מלא של כל שדה: docs\spine_annotator_output_fields.csv
 

@@ -9,7 +9,7 @@ never reached the final export.
 Now: A only stages; /commit-timepoint-fate (Shift+Enter) writes the QC tag,
 deletes any saved lineage claiming that spine at that timepoint (other
 timepoints return to the pool), never saves the open panel as a lineage, and is
-undone by /undo-last-decision. Artifact tags are exported to artifact_spines.csv.
+undone by /undo-last-decision. Artifact tags are exported to excluded_spines.csv (reason=artifact).
 
 Run with: python -m unittest tests.test_commit_timepoint_fate -v
 """
@@ -175,7 +175,8 @@ class TestCommitTimepointFate(unittest.TestCase):
             "/mtp/viewer/commit-timepoint-fate",
             json={"timepoint": "mid-droplet", "fate": "artifact"},
         )
-        rows = results_final_store._artifact_spine_rows_for_fov(self.respan, 1, "TESTANIMAL")
+        rows = results_final_store._excluded_spine_rows_for_fov(self.respan, 1, "TESTANIMAL")
+        rows = [r for r in rows if r["reason"] == "artifact"]
         self.assertEqual([(r["timepoint"], r["global_spine_id"]) for r in rows], [("mid-droplet", gid1)])
 
     def test_commit_rejects_wrong_timepoint_and_missing_spine(self):

@@ -41,7 +41,7 @@ spine_match_overtime/
 │   │   ├── spine_qc_tag_store.py  # QC ignore/flag tags (Timepoint-mode)
 │   │   ├── animal_layout.py       # FOV/timepoint discovery + fov_inventory.csv
 │   │   ├── results_final_store.py # Merges per-FOV outputs into Results final/
-│   │   ├── postprocess_registry.py # CLI-only: derives event_<tp>/lifecycle columns
+│   │   ├── observations_store.py  # spine_observations_long.csv (morphology per lineage x TP)
 │   │   ├── respan_bootstrap.py    # Workspace layout creation
 │   │   ├── project_paths.py       # Path constants (PROJECT_ROOT, RESULTS_DIR)
 │   │   ├── __main__.py            # Module launcher
@@ -298,8 +298,8 @@ Each handles persistence of one type of decision/metadata:
 - **ignored_spine_store.py**, **oof_segment_store.py** — Out-of-frame & ignore flags
 - **ignored_dendrite_store.py** — Whole-dendrite ignore markers set in the Phase 0 dendrite-link step (`ignored_dendrites.json`); resolved live against the catalog
 - **animal_layout.py** — FOV/timepoint discovery, `fov_inventory.csv`
-- **results_final_store.py** — Merges per-FOV outputs (incl. combined `ignored_spines.csv`) into `Results final/`
-- **postprocess_registry.py** — CLI-only: derives `event_<tp>`/`lifecycle` columns; never auto-invoked by the server
+- **results_final_store.py** — Merges per-FOV outputs (registry, observations, disposition, catalog, plus `excluded_spines.csv`) into `Results final/`
+- **observations_store.py** — `spine_observations_long.csv`: one row per lineage × timepoint with every RESPAN measure; rebuilt with the registry
 
 ---
 
@@ -349,13 +349,12 @@ After completing spine review + finalization:
 
 ### **spine_registry_wide.csv Schema** (Key Columns):
 - `lineage_id` — Unique lineage identifier
-- `pre_spine_id`, `mid_spine_id`, ... — Spine IDs at each TP (or empty)
+- `id_<tp>`, `local_id_<tp>` — Spine IDs at each TP (or empty)
 - `anchor_timepoint` — First TP where spine was confirmed
 - `first_seen_tp`, `last_seen_tp` — Temporal extent of observation
-- `status_<tp>` — matched | new | artifact | ignore | censored
-- `fate_<tp>` — The semantic fate (LOST, NEW, etc.)
-- `event_<tp>` — Derived events (appeared_at_X, lost_at_Y)
-- `lifecycle` — Derived summary (stable, transient, persistent_engram, right_censored, ...)
+- `status_<tp>` — matched | new | lost | absent (manual for a hand-added spine)
+- `<tp>_x/_y/_z` — only where a spine was observed; empty at absent / lost
+- No fate / artifact_mode / event / lifecycle columns (outputs review 2026-10, `docs/OUTPUTS_REVIEW_2026-10.md`); morphology is in `spine_observations_long.csv`
 
 See `docs/spine_annotator_output_fields.csv` for full field reference.
 
