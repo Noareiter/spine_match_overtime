@@ -13,6 +13,7 @@ multi-timepoint spine viewer (later phases).
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -78,9 +79,7 @@ def _sort_ids(ids) -> List[str]:
     return sorted({str(i) for i in ids if str(i).strip() not in {"", "nan", "None"}}, key=key)
 
 
-def _next_link_id() -> str:
-    _STATE.link_counter += 1
-    n = _STATE.link_counter
+def _format_link_id(n: int) -> str:
     a = _STATE.animal_id.strip()
     f = _STATE.fov.strip()
     if a and f:
@@ -88,6 +87,19 @@ def _next_link_id() -> str:
     if a:
         return f"{a}_D{n:03d}"
     return f"D{n:03d}"
+
+
+def _next_link_id() -> str:
+    """Next unused link id: above every existing D### number, never a reuse."""
+    used = {str(l.get("link_id") or "") for l in _STATE.links}
+    for lid in used:
+        m = re.search(r"_?D(\d+)$", lid)
+        if m:
+            _STATE.link_counter = max(_STATE.link_counter, int(m.group(1)))
+    _STATE.link_counter += 1
+    while _format_link_id(_STATE.link_counter) in used:
+        _STATE.link_counter += 1
+    return _format_link_id(_STATE.link_counter)
 
 
 def _mip_for(name: str) -> np.ndarray:
@@ -459,32 +471,6 @@ def unignore_dendrite(timepoint: str, dendrite_id: str) -> StateResponse:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@router.post("/auto-link-shared", response_model=StateResponse)
-def auto_link_shared() -> StateResponse:
-    """Bootstrap: one link per dendrite ID that appears (identically) in >= 2 timepoints."""
-    try:
-        all_ids: Dict[str, Dict[str, bool]] = {}
-        for name in _STATE.timepoint_names:
-            for did in _STATE.dendrite_ids.get(name, []):
-                all_ids.setdefault(did, {})[name] = True
-        existing = {
-            tuple(sorted((tp, did) for tp, ids in l["members"].items() for did in ids))
-            for l in _STATE.links
-        }
-        for did in _sort_ids(all_ids.keys()):
-            present = [n for n in _STATE.timepoint_names if all_ids[did].get(n)]
-            if len(present) < 2:
-                continue
-            members = {n: [did] for n in present}
-            sig = tuple(sorted((tp, d) for tp, ids in members.items() for d in ids))
-            if sig in existing:
-                continue
-            _STATE.links.append({"link_id": _next_link_id(), "members": members, "notes": "auto-shared-id"})
-        return _state_response()
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
 @router.post("/save", response_model=SaveResponse)
 def save_links() -> SaveResponse:
     try:
@@ -729,7 +715,6 @@ _PAGE_HTML = """<!doctype html>
       <div><label>FOV</label><input type="text" id="fovId" placeholder="1" style="width:48px"/></div>
       <button class="primary" onclick="bootstrapHub()">Reload FOV</button>
       <button class="primary" onclick="startSpineMatching()" style="background:#0f766e;border-color:#0f766e">Start spine matching</button>
-      <button onclick="autoLink()">Auto-link identical IDs</button>
       <button onclick="saveLinks()">Save links</button>
       <span style="flex:1"></span>
       <span id="linkCountLabel" class="hint" style="margin:0">0 links</span>
@@ -762,7 +747,6 @@ _PAGE_HTML = """<!doctype html>
     <h2>Group dendrites into cross-timepoint links</h2>
     <div class="toolbar">
       <button class="primary" onclick="createLink()">Create link from selection</button>
-      <button onclick="autoLink()">Auto-link identical IDs</button>
       <button class="danger" onclick="ignoreSelectedDendrites()">Ignore selected dendrite(s)</button>
       <button class="ghost" onclick="clearSelection()">Clear selection</button>
       <span style="flex:1"></span>
@@ -945,11 +929,6 @@ async function createLink(){
     STATE.timepoints.forEach(tp=>{ if(tp.has_tiff) schedulePreview(tp.name); });
     setStatus('Link created. '+STATE.links.length+' total.');
   }catch(e){ setStatus('Create link failed: '+e.message); }
-}
-async function autoLink(){
-  try{ STATE = await api('/mtp/auto-link-shared',{method:'POST'}); renderLinkHub();
-    setStatus('Auto-linked identical IDs. '+STATE.links.length+' total.'); }
-  catch(e){ setStatus('Auto-link failed: '+e.message); }
 }
 async function ignoreSelectedDendrites(){
   const pairs = [];
