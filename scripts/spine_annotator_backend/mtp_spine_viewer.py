@@ -427,13 +427,14 @@ def _build_phase_queues(respan: Path) -> None:
         return
     phase0: List[str] = []
     seen: set[str] = set()
+    tagged0 = _qc_tagged_at_tp(tps[0])
     for q in _STATE.spine_queue:
         pid = str(q["pre_spine_id"])
-        if pid not in seen and not _is_unavailable_for_matching(tps[0], pid):
+        if pid not in seen and not _is_unavailable_for_matching(tps[0], pid, tagged0):
             seen.add(pid)
             phase0.append(pid)
     for sid in _all_pre_spine_ids():
-        if sid not in seen and not _is_unavailable_for_matching(tps[0], sid):
+        if sid not in seen and not _is_unavailable_for_matching(tps[0], sid, tagged0):
             seen.add(sid)
             phase0.append(sid)
     phases: List[List[str]] = [phase0]
@@ -1212,13 +1213,23 @@ def _show_fate_dropdown(tp: str, positions: Dict[str, dict]) -> bool:
     return not pos.get("fate_locked")
 
 
-def _is_qc_tagged(tp: str, spine_id: str) -> bool:
-    """Spine carries a Timepoint-mode A/I tag at this timepoint."""
+def _qc_tagged_at_tp(tp: str) -> set[str]:
+    """Spine ids (as stored) carrying a Timepoint-mode A/I tag at this timepoint."""
     if not _STATE.respan_root:
-        return False
-    sid = str(spine_id or "").strip()
+        return set()
     tags = spine_qc_tag_store.load_tags(_respan_path(), _STATE.fov)
-    tagged = spine_qc_tag_store.tagged_spines_at_tp(tags, tp)
+    return set(spine_qc_tag_store.tagged_spines_at_tp(tags, tp))
+
+
+def _is_qc_tagged(tp: str, spine_id: str, tagged: Optional[set[str]] = None) -> bool:
+    """Spine carries a Timepoint-mode A/I tag at this timepoint.
+
+    Pass `tagged` (from _qc_tagged_at_tp) when checking many spines, so the tag
+    file is read once instead of once per spine.
+    """
+    sid = str(spine_id or "").strip()
+    if tagged is None:
+        tagged = _qc_tagged_at_tp(tp)
     if sid in tagged:
         return True
     if _STATE.catalog and spine_catalog_store.is_global_id(sid):
@@ -1226,9 +1237,11 @@ def _is_qc_tagged(tp: str, spine_id: str) -> bool:
     return False
 
 
-def _is_unavailable_for_matching(tp: str, spine_id: str) -> bool:
+def _is_unavailable_for_matching(
+    tp: str, spine_id: str, tagged: Optional[set[str]] = None
+) -> bool:
     """Ignored (OOF / ignored dendrite) or A/I-tagged: never part of a lineage."""
-    return _is_spine_ignored(tp, spine_id) or _is_qc_tagged(tp, spine_id)
+    return _is_spine_ignored(tp, spine_id) or _is_qc_tagged(tp, spine_id, tagged)
 
 
 def _is_spine_ignored(tp: str, spine_id: str) -> bool:
@@ -2597,17 +2610,21 @@ def update_focus(req: FocusRequest) -> SelectSpineResponse:
             exclude=_snap_exclusions(tp), max_dz=baseline_adapter.MAX_MATCH_Z_GAP,
         )
         if near:
-            pos.update(near)
-            pos["source"] = "click_nearest"
-            pos["fate"] = None
+            snapped = {**pos, **near, "source": "click_nearest", "fate": None}
+            trial = {**pos_map, tp: snapped}
+            # Focus always moves; a snap that would split the lineage is dropped
+            # (coordinate focus only) and Save explains the gap as everywhere else.
+            if _check_contiguity_would_violate(trial, _STATE.timepoint_names):
+                pos["spine_id"] = None
+                pos["source"] = "click_coord"
+                pos["fate"] = None
+            else:
+                pos = snapped
         else:
             pos["spine_id"] = None
             pos["source"] = "click_coord"
             pos["fate"] = None
         pos_map[tp] = pos
-        contiguity_error = _check_contiguity_would_violate(pos_map, _STATE.timepoint_names)
-        if contiguity_error:
-            raise ValueError(contiguity_error)
         updated = _apply_fate_rules(pos_map)
         _set_active_positions(updated)
         return _select_spine_response(
