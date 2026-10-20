@@ -429,11 +429,11 @@ def _build_phase_queues(respan: Path) -> None:
     seen: set[str] = set()
     for q in _STATE.spine_queue:
         pid = str(q["pre_spine_id"])
-        if pid not in seen and not _is_spine_ignored(tps[0], pid):
+        if pid not in seen and not _is_unavailable_for_matching(tps[0], pid):
             seen.add(pid)
             phase0.append(pid)
     for sid in _all_pre_spine_ids():
-        if sid not in seen and not _is_spine_ignored(tps[0], sid):
+        if sid not in seen and not _is_unavailable_for_matching(tps[0], sid):
             seen.add(sid)
             phase0.append(sid)
     phases: List[List[str]] = [phase0]
@@ -1221,6 +1221,25 @@ def _show_fate_dropdown(tp: str, positions: Dict[str, dict]) -> bool:
     return not pos.get("fate_locked")
 
 
+def _is_qc_tagged(tp: str, spine_id: str) -> bool:
+    """Spine carries a Timepoint-mode A/I tag at this timepoint."""
+    if not _STATE.respan_root:
+        return False
+    sid = str(spine_id or "").strip()
+    tags = spine_qc_tag_store.load_tags(_respan_path(), _STATE.fov)
+    tagged = spine_qc_tag_store.tagged_spines_at_tp(tags, tp)
+    if sid in tagged:
+        return True
+    if _STATE.catalog and spine_catalog_store.is_global_id(sid):
+        return (_STATE.catalog.to_local(tp, sid) or "") in tagged
+    return False
+
+
+def _is_unavailable_for_matching(tp: str, spine_id: str) -> bool:
+    """Ignored (OOF / ignored dendrite) or A/I-tagged: never part of a lineage."""
+    return _is_spine_ignored(tp, spine_id) or _is_qc_tagged(tp, spine_id)
+
+
 def _is_spine_ignored(tp: str, spine_id: str) -> bool:
     sid = str(spine_id or "").strip()
     if _STATE.catalog and spine_catalog_store.is_global_id(sid):
@@ -1458,14 +1477,21 @@ def _nearest_spine(
     *,
     tp: str,
     dendrite_ids: Optional[set[str]] = None,
+    exclude: Optional[set[str]] = None,
+    max_dz: Optional[float] = None,
 ) -> Optional[dict]:
     best: Optional[dict] = None
     best_d = float("inf")
+    exclude = exclude or set()
     for sid, rec in lookup.items():
+        if str(sid) in exclude:
+            continue
         did = str(rec.get("dendrite_id") or "")
         if dendrite_ids and did not in dendrite_ids:
             continue
         if not _filter_oof_spine(rec, tp, dendrite_id=did):
+            continue
+        if max_dz is not None and abs(float(rec["z"]) - z) > max_dz:
             continue
         d = float(
             np.hypot(float(rec["x"]) - x, float(rec["y"]) - y)
@@ -1481,6 +1507,13 @@ def _nearest_spine(
                 "dendrite_id": did,
             }
     return best
+
+
+def _snap_exclusions(tp: str) -> set[str]:
+    """Spines a click-snap must skip: claimed by another lineage, OOF / ignored,
+    A/I-tagged, or on an ignored dendrite. The active lineage's own spines stay."""
+    out = set(_claimed_spine_ids_by_tp(exclude_lineage_key=_resolve_lineage_key_for_active()).get(tp, set()))
+    return out - _current_lineage_spine_ids()
 
 
 def _estimate_shift_at(
@@ -2000,10 +2033,12 @@ def load_from_animal(
 
         catalog_path_str = _apply_catalog(respan)
         _inject_manual_from_decisions(respan, fov)
-        _build_queues()
+        # Load every exclusion source before the first queue build, so OOF /
+        # ignored / ignored-dendrite spines are never ranked as candidates.
         _STATE.oof_segments = oof_segment_store.load_segments(respan, fov)
         _STATE.ignored_by_tp = ignored_spine_store.load_ignored(respan, fov)
         _STATE.ignored_dendrites_by_tp = ignored_dendrite_store.load_ignored_dendrites(respan, fov)
+        _build_queues()
         _STATE.review_progress = spine_lineage_store.load_progress(respan, fov)
         _STATE.queue_phase_index = int(_STATE.review_progress.get("phase_index", 0) or 0)
         if _STATE.skip_orphan_phases:
@@ -2239,7 +2274,8 @@ def get_queue(mode: str = "main") -> dict:
 
 @router.post("/queue-mode")
 def set_queue_mode(req: QueueModeRequest) -> dict:
-    _STATE.queue_mode = "cross" if req.mode == "cross" else "main"
+    # Cross-dendrite suggestions were removed (rules review 19/20): main only.
+    _STATE.queue_mode = "main"
     _rebuild_spine_id_list()
     return {
         "queue_mode": _STATE.queue_mode,
@@ -2528,7 +2564,10 @@ def accept_suggestion(req: AcceptSuggestionRequest) -> SelectSpineResponse:
             x, y, z = pos.get("x"), pos.get("y"), pos.get("z")
             if x is None or y is None:
                 raise ValueError(f"No candidate to accept at '{tp}'.")
-            near = _nearest_spine(lookup, float(x), float(y), float(z or 0), tp=tp)
+            near = _nearest_spine(
+                lookup, float(x), float(y), float(z or 0), tp=tp,
+                exclude=_snap_exclusions(tp), max_dz=baseline_adapter.MAX_MATCH_Z_GAP,
+            )
             if not near:
                 raise ValueError(f"No candidate to accept at '{tp}'.")
             pos_map[tp] = {**near, "source": "accepted_suggestion", "fate": None}
@@ -2567,7 +2606,10 @@ def update_focus(req: FocusRequest) -> SelectSpineResponse:
         if req.z_plane is not None:
             pos["z"] = float(req.z_plane)
         lookup = _STATE.spine_lookup.get(tp) or {}
-        near = _nearest_spine(lookup, pos["x"], pos["y"], pos["z"], tp=tp)
+        near = _nearest_spine(
+            lookup, pos["x"], pos["y"], pos["z"], tp=tp,
+            exclude=_snap_exclusions(tp), max_dz=baseline_adapter.MAX_MATCH_Z_GAP,
+        )
         if near:
             pos.update(near)
             pos["source"] = "click_nearest"
@@ -2577,6 +2619,9 @@ def update_focus(req: FocusRequest) -> SelectSpineResponse:
             pos["source"] = "click_coord"
             pos["fate"] = None
         pos_map[tp] = pos
+        contiguity_error = _check_contiguity_would_violate(pos_map, _STATE.timepoint_names)
+        if contiguity_error:
+            raise ValueError(contiguity_error)
         updated = _apply_fate_rules(pos_map)
         _set_active_positions(updated)
         return _select_spine_response(
@@ -2707,7 +2752,7 @@ def set_spine(req: SetSpineRequest) -> SelectSpineResponse:
         lookup = _STATE.spine_lookup.get(tp) or {}
         if sid not in lookup:
             raise ValueError(f"Spine '{sid}' not found at '{tp}'.")
-        if _is_spine_ignored(tp, sid):
+        if _is_unavailable_for_matching(tp, sid):
             raise ValueError(
                 f"Spine '{sid}' at '{tp}' is ignored (OOF region, QC tag, or an "
                 f"ignored dendrite) and cannot be matched. Un-ignore it first if "

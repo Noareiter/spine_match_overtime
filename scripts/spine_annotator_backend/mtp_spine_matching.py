@@ -64,6 +64,12 @@ def _candidate_rows(
     allowed_t1_by_t2: Dict[str, set[str]],
     require_link: bool,
 ) -> Tuple[List[dict], List[dict]]:
+    """Candidate pre/mid pairs within MAX_Z.
+
+    With Phase-0 links: only pairs whose dendrites are linked. Without any link
+    in this FOV: every pair (no dendrite restriction). Cross-dendrite pairs are
+    never offered, so the second list is always empty.
+    """
     linked: List[dict] = []
     cross: List[dict] = []
     for _, t2 in t2_df.iterrows():
@@ -84,12 +90,8 @@ def _candidate_rows(
                 ),
                 "distance_z": dz,
             }
-            if require_link and not allowed_t1_d:
-                continue
-            if t1_d in allowed_t1_d:
+            if not require_link or t1_d in allowed_t1_d:
                 linked.append(row)
-            else:
-                cross.append(row)
     return linked, cross
 
 
@@ -166,11 +168,6 @@ def build_pre_mid_queues(
     linked_rows, cross_rows = _candidate_rows(
         pre, mid, allowed_t1_by_t2=allowed_t1_by_t2, require_link=bool(pairwise)
     )
-    if not linked_rows and pairwise:
-        linked_rows, _ = _candidate_rows(
-            pre, mid, allowed_t1_by_t2={}, require_link=False
-        )
-        cross_rows = []
 
     pre_tiff_path = (tiff_paths or {}).get(pre_tp)
     mid_tiff_path = (tiff_paths or {}).get(mid_tp)
@@ -213,7 +210,8 @@ def _score_pairwise_best(
         if str(t2["id"]) in exclude:
             continue
         t2_d = str(t2["dendrite_id"])
-        if pairwise and not allow_cross and t1_d not in allowed_t1_by_t2.get(t2_d, set()):
+        # allow_cross is ignored: no cross-dendrite suggestions (rules review 19/20).
+        if pairwise and t1_d not in allowed_t1_by_t2.get(t2_d, set()):
             continue
         dz = float(abs(float(t1_row["z"]) - float(t2["z"])))
         if dz > MAX_Z:
@@ -238,7 +236,6 @@ def _score_pairwise_best(
     top = scored.iloc[0]
     t2_id = str(top["t2_spine_id"])
     t2_row = t2_df[t2_df["id"].astype(str) == t2_id].iloc[0]
-    cross = bool(pairwise) and t1_d not in allowed_t1_by_t2.get(str(t2_row["dendrite_id"]), set())
     return {
         "spine_id": t2_id,
         "x": float(t2_row["x"]),
@@ -246,8 +243,8 @@ def _score_pairwise_best(
         "z": float(t2_row["z"]),
         "dendrite_id": str(t2_row["dendrite_id"]),
         "score": float(top.get("final_score", 0.0)),
-        "source": "algo_cross" if cross else "algo_chain",
-        "cross_dendrite": cross,
+        "source": "algo_chain",
+        "cross_dendrite": False,
     }
 
 
@@ -320,14 +317,19 @@ def build_lineage_positions(
         mid_tp = timepoint_names[1]
         mid_lookup = spine_lookup.get(mid_tp) or {}
         reg_mid = registry_members.get(mid_tp)
-        if reg_mid:
-            reg_sid = _global_id_for_lookup(
-                mid_lookup, str(reg_mid.get("spine_id", ""))
+        reg_mid_sid = (
+            _global_id_for_lookup(mid_lookup, str(reg_mid.get("spine_id", "")))
+            if reg_mid
+            else ""
+        )
+        if (
+            reg_mid_sid
+            and reg_mid_sid in mid_lookup
+            and reg_mid_sid not in claimed_spine_ids.get(mid_tp, set())
+        ):
+            positions[mid_tp] = _pos_from_lookup(
+                mid_lookup, reg_mid_sid, "registry", score=None
             )
-            if reg_sid in mid_lookup:
-                positions[mid_tp] = _pos_from_lookup(
-                    mid_lookup, reg_sid, "registry", score=None
-                )
         elif (
             mid_spine_id
             and str(mid_spine_id) in mid_lookup
@@ -367,7 +369,7 @@ def build_lineage_positions(
         tp_lookup = spine_lookup.get(tp) or {}
         if reg:
             reg_sid = _global_id_for_lookup(tp_lookup, str(reg.get("spine_id", "")))
-            if reg_sid in tp_lookup:
+            if reg_sid in tp_lookup and reg_sid not in claimed_spine_ids.get(tp, set()):
                 positions[tp] = _pos_from_lookup(
                     tp_lookup, reg_sid, "registry", score=None
                 )
@@ -640,6 +642,7 @@ def apply_local_registration(
             continue
         lookup = spine_lookup.get(tp) or {}
         linked = linked_dendrites_fn(pre_tp, bd, tp) if bd else set()
+        has_links = bool(dendrite_link_store.to_pairwise_links(cross_links, pre_tp, tp))
         excluded_here = (exclude_spine_ids or {}).get(tp, set())
         near = None
         best_d = float("inf")
@@ -647,7 +650,10 @@ def apply_local_registration(
             if str(rec_id) in excluded_here:
                 continue
             did = str(rec.get("dendrite_id") or "")
-            if linked and did not in linked:
+            # With links in this FOV, only the linked dendrite(s) - never cross.
+            if has_links and did not in linked:
+                continue
+            if abs(float(rec["z"]) - pz) > MAX_Z:
                 continue
             if oof_segments and oof_segment_store.coords_in_oof(
                 float(rec["x"]), float(rec["y"]), tp, oof_segments, dendrite_id=did
