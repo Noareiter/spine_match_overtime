@@ -18,6 +18,7 @@ Decisions taken one by one with the user (2026-10-20). **Implemented** on branch
 | 29 | How a lineage may end | Only two endings: MATCHED through the last timepoint, or LOST (first missing TP) then ABSENT. No lineage-level CENSORED / right-censored, no lineage-level IGNORE. ARTIFACT / IGNORE are point events on one detection at one timepoint, set only in Timepoint mode (QC tags). Remove lineage-level censoring code, IGNORE propagation and the `lineage_ignore` fallback (covers bugs 26, 28). |
 | 29c | A/I tag in Timepoint mode on a spine a saved lineage claims | Keep as today: the **whole lineage is deleted**, all its spines return to the pool, rebuild it from scratch. |
 | 29b | Tab→I (ignore every TP from Lineage mode) | Remove. IGNORE only in Timepoint mode, one detection at one timepoint (makes bug 34 moot). Supersedes the 2026-08-20 decision to keep it. |
+| 35b | Clear in Lineage mode | Clear at a timepoint after the first match clears that timepoint and every later one (spine disappeared → LOST on save). Before the first match it clears only that timepoint. Timepoint mode: anchor only. (b5e596e) |
 | 6 | Phase 0 auto-link by identical dendrite id | Remove the auto-link button/endpoint. RESPAN dendrite numbering is not consistent across timepoints; linking is manual only. |
 
 ## Bugs to fix (no decision needed)
