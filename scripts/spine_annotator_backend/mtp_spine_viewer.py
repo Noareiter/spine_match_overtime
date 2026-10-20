@@ -3679,6 +3679,8 @@ def upsert_oof_segment(req: OofSegmentRequest) -> dict:
         _ensure_nonempty_phase(respan)
         n_ignored = sum(len(v) for v in ignored_add.values())
         return {
+            "positions": _positions_response() if _STATE.active_t1_spine_id else {},
+            "positions_b": _positions_response_b(),
             "segment": entry,
             "segments": _STATE.oof_segments,
             "ignored_spines": {k: v for k, v in ignored_add.items() if v},
@@ -3730,6 +3732,8 @@ def update_oof_tp(req: OofTpBoundsRequest) -> dict:
         _rebuild_spine_id_list()
         _ensure_nonempty_phase(respan)
         return {
+            "positions": _positions_response() if _STATE.active_t1_spine_id else {},
+            "positions_b": _positions_response_b(),
             "segment": seg,
             "segments": _STATE.oof_segments,
             "queue_count": len(_STATE.t1_spine_ids),

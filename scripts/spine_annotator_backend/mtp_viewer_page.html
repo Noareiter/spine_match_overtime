@@ -915,6 +915,7 @@ async function saveOofEdit() {
       body: JSON.stringify(body),
     });
     S.oofSegments = res.segments || [];
+    applyPositionsResponse(res);
     if (res.spine_ids) {
       S.t1SpineIds = res.spine_ids;
       fillSpinePick();
@@ -1350,6 +1351,8 @@ async function confirmOofApply() {
       body: JSON.stringify(body)
     });
     S.oofSegments = res.segments || [];
+    applyPositionsResponse(res);  // a spine now inside OOF leaves the open lineage
+    updateHeaders(); updateFateBars();
     cancelOofModal();
     const nIgn = res.ignored_count || 0;
     document.getElementById('status').textContent =
