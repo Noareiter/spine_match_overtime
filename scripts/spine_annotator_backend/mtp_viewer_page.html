@@ -2654,17 +2654,14 @@ function renderTpPick() {
   const el = document.getElementById('tpPick');
   if (!el) return;
   if (!TP_CATALOG.length) { el.innerHTML = ''; return; }
-  const boxes = TP_CATALOG.map(tp => {
-    const dis = tp.has_csv ? '' : ' disabled';
-    const chk = tp.selected && tp.has_csv ? ' checked' : '';
-    const tag = tp.has_csv ? ' ('+tp.spine_count+' spines)' : ' (no CSV)';
-    return '<label style="margin-right:12px;white-space:nowrap"><input type="checkbox" class="tp-chk" value="'+tp.name.replace(/"/g,'&quot;')+'"'+dis+chk+'> '+tp.name+tag+'</label>';
-  }).join('');
-  el.innerHTML = '<b>Active timepoints</b> — '+boxes;
+  const items = TP_CATALOG.filter(tp => tp.selected).map(tp =>
+    '<span style="margin-right:12px;white-space:nowrap">'+tp.name+(tp.has_csv ? ' ('+tp.spine_count+' spines)' : ' (MISSING CSV)')+'</span>'
+  ).join('');
+  el.innerHTML = '<b>Timepoints (from config)</b> — '+items;
 }
 
 function selectedTimepointsQuery() {
-  return [...document.querySelectorAll('.tp-chk:checked')].map(el => el.value).join(',');
+  return '';  // timepoints come from config only
 }
 
 function jumpSpine() { selectSpineAt(parseInt(document.getElementById('spinePick').value,10)||0); }

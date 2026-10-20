@@ -558,24 +558,11 @@ def load_saved(req: LoadSavedRequest) -> StateResponse:
 def load_from_animal(fov: int = 1, timepoints: str = "") -> StateResponse:
     """Auto-configure timepoints from respan; optional comma-separated subset."""
     try:
-        from . import animal_config, animal_layout, timepoint_selection
+        from . import animal_config, animal_layout
 
         cfg = animal_config.load_config()
         respan = animal_config.require_respan_root(cfg)
-        requested = timepoint_selection.parse_timepoint_query(timepoints)
-        saved = timepoint_selection.load(respan, fov)
-        available = animal_layout.discover_available_timepoints(respan, fov)
-        selected = animal_config.resolve_active_timepoints(
-            cfg,
-            available,
-            requested=requested or None,
-            saved=saved or None,
-        )
-        if requested:
-            timepoint_selection.save(respan, fov, selected, animal_id=cfg.animal_id)
-        inv = animal_layout.build_fov_inventory(
-            respan, fov, animal_id=cfg.animal_id, selected_timepoints=selected
-        )
+        inv = animal_layout.build_fov_inventory(respan, fov, animal_id=cfg.animal_id)
         tps: List[ConfigureTimepoint] = []
         for row in inv.timepoints:
             if not row.csv_path:
@@ -1071,18 +1058,14 @@ function renderTpPick() {
   const el = document.getElementById('tpPick');
   if (!el) return;
   if (!TP_CATALOG.length) { el.innerHTML = ''; return; }
-  const boxes = TP_CATALOG.map(tp => {
-    const dis = tp.has_csv ? '' : ' disabled';
-    const chk = tp.selected && tp.has_csv ? ' checked' : '';
-    const tag = tp.has_csv ? ' ('+tp.spine_count+' spines)' : ' (no CSV)';
-    return '<label style="margin-right:12px;white-space:nowrap"><input type="checkbox" class="tp-chk" value="'+tp.name.replace(/"/g,'')+'"'+dis+chk+'> '+tp.name+tag+'</label>';
-  }).join('');
-  el.innerHTML = '<b>Active timepoints</b> (uncheck to exclude) — '+boxes;
+  const items = TP_CATALOG.filter(tp => tp.selected).map(tp =>
+    '<span style="margin-right:12px;white-space:nowrap">'+tp.name+(tp.has_csv ? ' ('+tp.spine_count+' spines)' : ' (MISSING CSV)')+'</span>'
+  ).join('');
+  el.innerHTML = '<b>Timepoints (from config)</b> — '+items;
 }
 
 function selectedTimepointsQuery() {
-  const names = [...document.querySelectorAll('.tp-chk:checked')].map(el => el.value);
-  return names.join(',');
+  return '';  // timepoints come from config only
 }
 
 async function bootstrapHub(reloadAnimal=true){

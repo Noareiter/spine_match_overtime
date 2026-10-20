@@ -95,22 +95,17 @@ def discover_fovs(respan_root: Path) -> List[int]:
 
 
 def discover_timepoint_dirs(respan_root: Path, *, preferred_order: Optional[List[str]] = None) -> List[Path]:
+    """Timepoint folders named in the config order (other subfolders are ignored)."""
     prov = _import_input_provenance()
     found = prov.list_respan_timepoint_dirs(respan_root)
     if not preferred_order:
         return found
     by_key = {prov.normalize_timepoint_key(p.name): p for p in found}
-    ordered: List[Path] = []
-    seen: set[str] = set()
-    for label in preferred_order:
-        key = prov.normalize_timepoint_key(label)
-        if key in by_key:
-            ordered.append(by_key[key])
-            seen.add(by_key[key].name.lower())
-    for p in found:
-        if p.name.lower() not in seen:
-            ordered.append(p)
-    return ordered
+    return [
+        by_key[prov.normalize_timepoint_key(label)]
+        for label in preferred_order
+        if prov.normalize_timepoint_key(label) in by_key
+    ]
 
 
 def find_spine_csv(respan_root: Path, timepoint: str, fov: int) -> Path:
@@ -191,7 +186,6 @@ def build_fov_inventory(
     fov: int,
     *,
     animal_id: str = "",
-    selected_timepoints: Optional[List[str]] = None,
 ) -> FovInventory:
     cfg = animal_config.load_config()
     tp_dirs = discover_timepoint_dirs(respan_root, preferred_order=cfg.timepoint_order)
@@ -215,11 +209,7 @@ def build_fov_inventory(
             row.missing.append("tiff")
         all_rows.append(row)
 
-    active_names = animal_config.resolve_active_timepoints(
-        cfg,
-        available_names,
-        requested=selected_timepoints,
-    )
+    active_names = animal_config.resolve_active_timepoints(cfg, available_names)
     active_set = set(active_names)
     rows = [r for r in all_rows if r.name in active_set]
 
@@ -290,10 +280,8 @@ def write_fov_inventory_csv(
 def list_timepoint_catalog(
     respan_root: Path,
     fov: int,
-    *,
-    saved_selection: Optional[List[str]] = None,
 ) -> List[dict]:
-    """All known timepoints with availability flags (for UI checkboxes)."""
+    """Configured timepoints with availability flags (read-only display)."""
     cfg = animal_config.load_config()
     tp_dirs = discover_timepoint_dirs(respan_root, preferred_order=cfg.timepoint_order)
     available: List[str] = []
@@ -315,14 +303,9 @@ def list_timepoint_catalog(
             row.missing.append("tiff")
         by_name[name] = row
 
-    active = animal_config.resolve_active_timepoints(
-        cfg,
-        available,
-        saved=saved_selection,
-    )
-    active_set = set(active)
+    active_set = set(animal_config.selected_timepoints(cfg))
     catalog: List[dict] = []
-    for name in cfg.timepoint_order + [n for n in by_name if n not in cfg.timepoint_order]:
+    for name in cfg.timepoint_order:
         if name not in by_name:
             continue
         row = by_name[name]

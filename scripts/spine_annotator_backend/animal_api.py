@@ -127,22 +127,11 @@ def bootstrap_respan() -> BootstrapResponse:
 @router.get("/inventory", response_model=FovInventoryResponse)
 def get_fov_inventory(fov: int = 1, timepoints: str = "") -> FovInventoryResponse:
     try:
-        from . import timepoint_selection
-
         cfg = animal_config.load_config()
         respan = animal_config.require_respan(cfg)
-        requested = timepoint_selection.parse_timepoint_query(timepoints)
-        saved = timepoint_selection.load(respan, fov)
-        selected = animal_config.resolve_active_timepoints(
-            cfg,
-            animal_layout.discover_available_timepoints(respan, fov),
-            requested=requested or None,
-            saved=saved or None,
-        )
-        inv = animal_layout.build_fov_inventory(
-            respan, fov, animal_id=cfg.animal_id, selected_timepoints=selected
-        )
-        catalog = animal_layout.list_timepoint_catalog(respan, fov, saved_selection=selected)
+        selected = animal_config.selected_timepoints(cfg)
+        inv = animal_layout.build_fov_inventory(respan, fov, animal_id=cfg.animal_id)
+        catalog = animal_layout.list_timepoint_catalog(respan, fov)
         return FovInventoryResponse(
             animal_id=inv.animal_id,
             fov=inv.fov,

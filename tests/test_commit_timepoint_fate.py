@@ -29,6 +29,9 @@ SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _fixtures  # noqa: E402
+
 # A second, far-away mid-droplet spine keeps the main phase from finishing when
 # spine 1's lineage is saved, so spine 1 can be re-opened afterwards.
 MID_CSV = """spine_id,x,y,z,dendrite_id
@@ -50,6 +53,7 @@ class TestCommitTimepointFate(unittest.TestCase):
             (respan / tp / "Tables" / "fov1_detected_spines.csv").write_text(
                 body, encoding="utf-8"
             )
+        _fixtures.add_tiffs(respan)
         config = {
             "animal_id": "TESTANIMAL",
             "workspace": str(self._root),

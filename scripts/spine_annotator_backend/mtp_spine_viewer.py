@@ -1969,24 +1969,15 @@ def load_from_animal(
     timepoints: str = "",
 ) -> LoadResponse:
     try:
-        from . import timepoint_selection
-
         cfg = animal_config.load_config()
         respan = animal_config.require_respan_root(cfg)
-        requested = timepoint_selection.parse_timepoint_query(timepoints)
-        saved = timepoint_selection.load(respan, fov)
-        available = animal_layout.discover_available_timepoints(respan, fov)
-        selected = animal_config.resolve_active_timepoints(
-            cfg,
-            available,
-            requested=requested or None,
-            saved=saved or None,
-        )
-        if requested:
-            timepoint_selection.save(respan, fov, selected, animal_id=cfg.animal_id)
-        inv = animal_layout.build_fov_inventory(
-            respan, fov, animal_id=cfg.animal_id, selected_timepoints=selected
-        )
+        missing = animal_config.missing_animal_files(cfg, respan)
+        if missing:
+            raise ValueError(
+                "Animal is incomplete — every FOV needs every selected timepoint: "
+                + "; ".join(missing)
+            )
+        inv = animal_layout.build_fov_inventory(respan, fov, animal_id=cfg.animal_id)
         _STATE.reset()
         _STATE.animal_id = cfg.animal_id
         _STATE.skip_orphan_phases = bool(cfg.skip_orphan_phases)

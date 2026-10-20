@@ -83,7 +83,6 @@ _COPY_JSON_NAMES = (
     "oof_segments.json",
     "dendrite_links.json",
     "spine_review_progress.json",
-    "timepoint_selection.json",
     "spine_qc_tags.json",
 )
 
@@ -113,14 +112,7 @@ def _fov_timepoints(respan: Path, fov: int, cfg: animal_config.AnimalConfig) -> 
     available = animal_layout.discover_available_timepoints(respan, fov)
     if not available:
         return []
-    from . import timepoint_selection
-
-    saved = timepoint_selection.load(respan, fov)
-    return animal_config.resolve_active_timepoints(
-        cfg,
-        available,
-        saved=saved or None,
-    )
+    return animal_config.resolve_active_timepoints(cfg, available)
 
 
 def fov_review_status(

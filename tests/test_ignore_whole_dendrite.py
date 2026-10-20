@@ -33,6 +33,9 @@ SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _fixtures  # noqa: E402
+
 MID_CSV = """spine_id,x,y,z,dendrite_id
 1,100.0,100.0,5.0,1
 """
@@ -57,6 +60,7 @@ class TestIgnoreWholeDendrite(unittest.TestCase):
         (respan / "end-droplet" / "Tables" / "fov1_detected_spines.csv").write_text(
             END_CSV, encoding="utf-8"
         )
+        _fixtures.add_tiffs(respan)
         config = {
             "animal_id": "TESTANIMAL",
             "workspace": str(self._root),

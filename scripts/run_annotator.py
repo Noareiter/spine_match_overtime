@@ -65,6 +65,18 @@ def main() -> None:
     paths = resolve_paths(cfg)
     url = f"http://{args.host}:{args.port}/mtp/"
 
+    if paths.get("respan_root"):
+        from spine_annotator_backend.animal_config import missing_animal_files, selected_timepoints
+
+        print(f"Checking files: FOVs {cfg.fovs or [cfg.default_fov]} x {selected_timepoints(cfg)}", flush=True)
+        missing = missing_animal_files(cfg, Path(paths["respan_root"]))
+        if missing:
+            print("\nERROR: Animal is incomplete — every FOV needs every selected timepoint.")
+            for line in missing:
+                print(f"  missing  {line}")
+            print("\nAdd the files, or edit fovs / timepoint_order / active_timepoints in config/annotator.json.\n", flush=True)
+            raise SystemExit(1)
+
     print(f"Config: {paths.get('config_path', args.config)}")
     print(f"Animal: {paths.get('animal_id') or '(not set)'}")
     if paths.get("workspace"):
