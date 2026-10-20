@@ -144,7 +144,7 @@
   <div class="row-wrap" id="topRowWrap"><div class="grid5" id="zoomRow"></div></div>
   <div class="row-label" id="bottomRowLabel" style="margin-top:12px">Bottom — full FOV (wheel = zoom · Shift+wheel = Z · Fit = whole image)</div>
   <div class="row-wrap" id="bottomRowWrap"><div class="grid5" id="fovRow"></div></div>
-  <div class="legend">Lineage: Tab = clear all · I = ignore all TPs · Save = infer new/lost. Timepoint (S): Tab = clear anchor only · A/I = anchor only · Save &amp; next when done.</div>
+  <div class="legend">Lineage: Tab = clear all (asks first) · Save = infer NEW/LOST. Timepoint (S): Tab = clear anchor only · A/I = tag this spine only · Save &amp; next when done.</div>
 </div>
 <div class="oof-modal-backdrop" id="oofModalBackdrop">
   <div class="oof-modal" onclick="event.stopPropagation()">
@@ -1963,9 +1963,6 @@ function updateFateBars() {
       <select id="fsel_${esc(tp)}" onchange="onFateChange('${tp}')" ${show && !p.fate_locked ? '' : 'style="display:none"'}${lockNote}>${opts}</select>
       ${shortcutHint}
       <button onclick="clearTp('${tp}')" style="font-size:10px;padding:3px 6px">Clear</button>`;
-    if (p.fate_locked && !p.fate) {
-      bar.innerHTML += '<span style="color:var(--muted);font-size:10px">Lineage lost after previous TP</span>';
-    }
   });
 }
 
@@ -2234,7 +2231,7 @@ function onViewerKeydown(e) {
       const tp = S.anchorTp || S.timepoints[0];
       if (tp) clearTp(tp);
     } else {
-      clearAllTps(true);
+      clearAllTps(false);  // asks for confirmation (rules review bug 35)
     }
     return;
   }
@@ -2243,7 +2240,9 @@ function onViewerKeydown(e) {
     e.preventDefault();
     e.stopPropagation();
     if (S.reviewMode === 'lineage') {
-      ignoreAllTpsLineage();
+      // Ignore-all-timepoints was removed (rules review 29b).
+      document.getElementById('status').textContent =
+        'IGNORE is per detection: press S for Timepoint mode, then I.';
     } else {
       const tp = S.anchorTp || S.timepoints[0];
       if (tp) setLocalFate(tp, 'ignore');

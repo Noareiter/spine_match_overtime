@@ -1155,16 +1155,12 @@ def _attach_results_final(respan: Path, out: dict, *, rebuild: bool = True) -> N
 def _apply_fate_rules(positions: Dict[str, dict]) -> Dict[str, dict]:
     tps = _STATE.timepoint_names
     out = {tp: dict(positions.get(tp) or {}) for tp in tps}
-    for i, tp in enumerate(tps):
+    for tp in tps:
         pos = dict(out.get(tp) or {})
         pos.setdefault("fate", None)
+        # LOST / ABSENT are inferred and A / I tag one detection, not the
+        # lineage, so nothing is locked after a LOST (rules review bug 30).
         pos["fate_locked"] = False
-        if i > 0:
-            prev = out.get(tps[i - 1]) or {}
-            prev_fate = str(prev.get("fate") or "").lower()
-            prev_scope = spine_lineage_store.decision_scope(prev)
-            if prev_fate == "lost" and prev_scope != spine_lineage_store.DECISION_SCOPE_LOCAL:
-                pos["fate_locked"] = True
         out[tp] = pos
     return out
 
@@ -1180,15 +1176,10 @@ def _all_prior_empty(positions: Dict[str, dict], idx: int) -> bool:
 
 
 def _false_positive_eligible(tp: str, positions: Dict[str, dict]) -> bool:
-    """False+ only when this TP has a match and every other TP is clear (no match, no fate)."""
-    pos = positions.get(tp) or {}
-    if not str(pos.get("spine_id") or "").strip():
-        return False
-    if spine_lineage_store._is_false_positive_mark(pos):
-        return False
-    return spine_lineage_store.all_other_timepoints_cleared(
-        positions, list(_STATE.timepoint_names), tp
-    )
+    """Always False: ARTIFACT / IGNORE are set only in Timepoint mode (S, then A / I),
+    one detection at one timepoint (rules review 29). The lineage-mode False+
+    buttons are hidden by this."""
+    return False
 
 
 def _fate_options_for_tp(
@@ -2801,13 +2792,11 @@ def clear_tp(req: ClearTpRequest) -> SelectSpineResponse:
         pos.pop("decision_scope", None)
         pos["source"] = "cleared"
         pos_map[tp] = pos
-        if _STATE.review_mode == REVIEW_MODE_LINEAGE:
-            pos_map = spine_lineage_store.release_unbound_matches(
-                pos_map, _STATE.timepoint_names
-            )
+        # No silent trimming: if this leaves a gap, Save refuses with the reason
+        # (a lineage is never split) and the user decides what to clear.
         _set_active_positions(_apply_fate_rules(pos_map))
         return _select_spine_response(
-            message=f"Cleared {tp} — released spines return to matching pool.",
+            message=f"Cleared {tp}.",
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -2874,7 +2863,7 @@ def set_review_mode(req: ReviewModeRequest) -> SelectSpineResponse:
         raise HTTPException(status_code=400, detail=f"Invalid review mode '{mode}'.")
     _STATE.review_mode = mode
     anchor = _current_anchor_timepoint()
-    label = "Lineage mode" if mode == REVIEW_MODE_LINEAGE else f"Timepoint mode ({anchor}) · A/I/N/L"
+    label = "Lineage mode" if mode == REVIEW_MODE_LINEAGE else f"Timepoint mode ({anchor}) · A/I"
     return SelectSpineResponse(
         t1_spine_id=_STATE.active_t1_spine_id,
         positions=_positions_response(),
@@ -2966,62 +2955,20 @@ def set_fate(req: SetFateRequest) -> SelectSpineResponse:
 
 @router.post("/set-fate-all-tps", response_model=SelectSpineResponse)
 def set_fate_all_tps(req: SetFateAllRequest) -> SelectSpineResponse:
-    """Lineage mode: clear matches and apply local ignore on every timepoint (Tab → I workflow)."""
-    try:
-        _apply_conflict_edit_row(req.lineage_row)
-        fate = str(req.fate or "").strip().lower()
-        review_mode = str(req.review_mode or _STATE.review_mode or REVIEW_MODE_LINEAGE).strip().lower()
-        if review_mode not in (REVIEW_MODE_LINEAGE, REVIEW_MODE_TIMEPOINT):
-            review_mode = REVIEW_MODE_LINEAGE
-        _STATE.review_mode = review_mode
-        if review_mode != REVIEW_MODE_LINEAGE:
-            raise ValueError("Ignore-all is for lineage mode only (Tab → I). In timepoint mode, I applies to the anchor TP.")
-        if fate != "ignore":
-            raise ValueError("Bulk all-timepoint fate supports IGNORE only.")
-        pos_map = _active_positions()
-        if not pos_map:
-            raise ValueError("No active spine.")
-        respan = _respan_path()
-        applied: List[str] = []
-        for tp in _STATE.timepoint_names:
-            pos = dict(pos_map.get(tp) or {})
-            if pos.get("fate_locked"):
-                continue
-            spine_to_tag = pos.get("spine_id") or ""
-            if pos.get("spine_id"):
-                pos["spine_id"] = None
-            spine_qc_tag_store.save_tag(
-                respan, _STATE.fov,
-                timepoint=tp,
-                spine_id=spine_to_tag,
-                tag=fate,
-                animal_id=_STATE.animal_id
-            )
-            pos["fate"] = None
-            pos["removed_spine_id"] = None
-            pos["artifact_mode"] = None
-            pos.pop("decision_scope", None)
-            pos["source"] = "cleared"
-            pos_map[tp] = pos
-            applied.append(tp)
-        if not applied:
-            raise ValueError("No timepoint available for bulk ignore (all blocked by lineage LOST).")
-        _set_active_positions(_apply_fate_rules(pos_map))
-        _build_phase_queues(respan)
-        _rebuild_spine_id_list()
-        active = _current_anchor_timepoint()
-        return _select_spine_response(
-            review_mode=_STATE.review_mode,
-            anchor_timepoint=active,
-            message=f"IGNORE on {len(applied)} timepoint(s)",
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    """Removed (rules review 29b): IGNORE is a Timepoint-mode tag on one detection."""
+    raise HTTPException(
+        status_code=400,
+        detail="Ignore-all-timepoints was removed. Press S for Timepoint mode, then I on one spine.",
+    )
 
 
 @router.post("/tag-false-positive", response_model=SelectSpineResponse)
 def tag_false_positive(req: TagFalsePositiveRequest) -> SelectSpineResponse:
-    """Remove a lone matched spine as false positive (algorithm noise vs OOF location)."""
+    """Removed (rules review 29): use Timepoint mode (S) + A / I on the detection."""
+    raise HTTPException(
+        status_code=400,
+        detail="False+ was removed. Press S for Timepoint mode, then A or I on this spine.",
+    )
     try:
         _apply_conflict_edit_row(req.lineage_row)
         tp = req.timepoint

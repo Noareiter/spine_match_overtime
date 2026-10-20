@@ -9,7 +9,7 @@ first missing timepoint] -> [ABSENT...].
 - The empty timepoint after the last match is always LOST (never IGNORE from an
   OOF region - censoring is manual only).
 - A lineage is never split: a gap between two matches blocks the save.
-- After LOST only ABSENT is allowed; anything else blocks the save.
+- Stored fates (IGNORE / ARTIFACT / censored / NEW) are dropped and re-inferred.
 
 Run with: python -m unittest tests.test_absent_lost_rules -v
 """
@@ -87,6 +87,16 @@ class TestStatuses(unittest.TestCase):
         self.assertEqual(sls.status_for_tp_data(out["T4"]), "absent")
 
 
+    def test_split_lineage_keeps_anchor_block(self):
+        # Conflict resolution / legacy data may split a lineage; finalize keeps
+        # the block holding the anchor and releases the rest (bug 31).
+        per_tp = {tp: dict(td) for tp, td in zip(TPS, [_match(1), EMPTY, _match(3), _match(4), EMPTY])}
+        out, *_ = sls.finalize_lineage_per_tp(per_tp, TPS, pre_spine_id="", anchor_timepoint="T3")
+        statuses = [sls.status_for_tp_data(out[tp]) for tp in TPS]
+        self.assertEqual(statuses, ["absent", "absent", "new", "matched", "lost"])
+        self.assertEqual(out["T1"].get("removed_spine_id"), "S_0001")
+
+
 class TestSaveValidation(unittest.TestCase):
     def setUp(self):
         self._root = Path(tempfile.mkdtemp(prefix="absent_lost_rules_"))
@@ -112,10 +122,30 @@ class TestSaveValidation(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "cannot be split"):
             self._save([_match(1), blind, _match(3), EMPTY, EMPTY])
 
-    def test_censored_after_lost_blocks_save(self):
+    def test_lineage_level_censoring_is_dropped(self):
+        # No lineage-level CENSORED / IGNORE (rules review 29): a legacy
+        # blind-spot mark after the last match is dropped -> LOST then ABSENT.
         blind = {"fate": "artifact", "artifact_mode": "blind_spot"}
-        with self.assertRaisesRegex(ValueError, "only ABSENT"):
-            self._save([_match(1), _match(2), EMPTY, blind, EMPTY])
+        self._save([_match(1), _match(2), EMPTY, blind, EMPTY])
+        lin = sls.load_decisions(self._root, 1)["lineages"][0]
+        statuses = [sls.status_for_tp_data(lin["per_tp"][tp]) for tp in TPS]
+        self.assertEqual(statuses, ["matched", "matched", "lost", "absent", "absent"])
+
+    def test_sticky_new_is_rederived(self):
+        # Bug 27: a stored NEW must not block matching an earlier timepoint.
+        new2 = {**_match(2), "fate": "new", "source": "inferred_new"}
+        self._save([_match(1), new2, _match(3), EMPTY, EMPTY])
+        lin = sls.load_decisions(self._root, 1)["lineages"][0]
+        statuses = [sls.status_for_tp_data(lin["per_tp"][tp]) for tp in TPS]
+        self.assertEqual(statuses, ["matched", "matched", "matched", "lost", "absent"])
+
+    def test_legacy_ignore_before_first_match_is_dropped(self):
+        # Bug 26 / 28: only ABSENT before the first match; no IGNORE propagation.
+        ign = {"fate": "ignore", "source": "manual"}
+        self._save([ign, _match(2), _match(3), EMPTY, EMPTY])
+        lin = sls.load_decisions(self._root, 1)["lineages"][0]
+        statuses = [sls.status_for_tp_data(lin["per_tp"][tp]) for tp in TPS]
+        self.assertEqual(statuses, ["absent", "new", "matched", "lost", "absent"])
 
     def test_valid_lineage_saves(self):
         self._save([_match(1), _match(2), EMPTY, EMPTY, EMPTY])

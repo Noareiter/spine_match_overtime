@@ -388,9 +388,12 @@ def build_disposition_rows(
                     status = spine_lineage_store.status_for_tp_data(td_anchor)
                     fate = str(td_anchor.get("fate") or "")
                     mapped = _disposition_from_status(status, fate)
-                    disposition = mapped or DISPOSITION_LINEAGE_IGNORE
-                    lineage_key = gid
-                    reviewed = "yes"
+                    # An anchor its own lineage does not hold stays unreviewed
+                    # (IGNORE is never inferred; tag it A/I or match it).
+                    if mapped:
+                        disposition = mapped
+                        lineage_key = gid
+                        reviewed = "yes"
         elif gid in anchor_keys.get(tp, set()):
             lin = spine_lineage_store.get_lineage_by_key(respan, fov, gid)
             if lin:
@@ -398,9 +401,10 @@ def build_disposition_rows(
                 status = spine_lineage_store.status_for_tp_data(td)
                 fate = str(td.get("fate") or "")
                 mapped = _disposition_from_status(status, fate)
-                disposition = mapped or DISPOSITION_LINEAGE_IGNORE
-                lineage_key = gid
-                reviewed = "yes"
+                if mapped:
+                    disposition = mapped
+                    lineage_key = gid
+                    reviewed = "yes"
 
         if disposition == DISPOSITION_UNREVIEWED:
             unreviewed += 1
@@ -674,7 +678,6 @@ def apply_conflict_resolution(
         )
         has_any = any(
             str((finalized.get(tp) or {}).get("spine_id") or "").strip()
-            or str((finalized.get(tp) or {}).get("fate") or "").strip()
             for tp in timepoint_names
         )
         if not has_any:
