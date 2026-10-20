@@ -37,7 +37,6 @@ spine_match_overtime/
 │   │   ├── spine_lineage_store.py # Lineage decisions (fate, matched pairs)
 │   │   ├── mtp_spine_matching.py  # Pre→mid queue + multi-TP lineage-chain scoring
 │   │   ├── manual_spine_store.py  # Manual spine annotations
-│   │   ├── timepoint_selection.py # TP selection per FOV
 │   │   ├── spine_qc_store.py      # QC metadata
 │   │   ├── spine_qc_tag_store.py  # QC ignore/flag tags (Timepoint-mode)
 │   │   ├── animal_layout.py       # FOV/timepoint discovery + fov_inventory.csv
@@ -74,7 +73,7 @@ Path: workspace/respan/ (or workspace itself if named "respan")
 - **workspace**: Can be absolute (`E:/...`) or relative (`results/...`)
 - **timepoint_order**: Defines ordering (pre-droplet, mid-droplet, end-droplet, end-lever, return to droplet)
 - **fovs**: List of field-of-view numbers to load
-- **active_timepoints**: Subset of TPs to work on (optional, defaults to all)
+- **active_timepoints**: Subset of TPs to work on (optional, defaults to all). Timepoints come only from config and are the same for every FOV; the server refuses to start if any configured FOV lacks a CSV or TIFF for a selected timepoint
 
 ### 2. **Bootstrap & Directory Layout** (`respan_bootstrap.py`)
 
@@ -93,7 +92,6 @@ respan/
     │   ├── spine_catalog.csv         # Global spine IDs (S_00001, S_00002, ...)
     │   ├── dendrite_links.json       # Phase 0: dendrite linking decisions
     │   ├── dendrite_link_progress.json
-    │   ├── timepoint_selection.json  # Which TPs are active
     │   ├── lineage_decisions.json    # Phase 1: spine matches + fate
     │   ├── spine_registry_wide.csv   # Output: denormalized per-lineage registry
     │   └── spine_review_progress.json
@@ -177,6 +175,8 @@ After user confirms all matches, the app infers **fate** for each spine:
 | `LOST` | First timepoint missing after the last match (one TP only; always LOST, even inside an OOF region) |
 | `absent` | Before NEW or after LOST only; never ABSENT→NEW→ABSENT |
 | `CENSORED` | Data quality issue; not counted as lost |
+
+See `docs/RULES_REVIEW_2026-10.md` for every rule decided in the October 2026 review (config-only timepoints, no cross-dendrite suggestions, OOF on the drawn timepoint only, no lineage-level IGNORE/ARTIFACT/censoring, A/I only in Timepoint mode).
 
 Save is blocked (`validate_lineage_shape`) when a lineage is split by a gap / ARTIFACT / IGNORE between matches, or when anything but ABSENT follows LOST.
 
@@ -293,7 +293,6 @@ Each handles persistence of one type of decision/metadata:
 - **spine_catalog_store.py** — `spine_catalog.csv` (global spine ID assignment)
 - **spine_lineage_store.py** — `lineage_decisions.json` (per-spine per-TP decisions)
 - **manual_spine_store.py** — Manual spine annotations (clicks)
-- **timepoint_selection.py** — Which TPs are active per FOV
 - **spine_qc_store.py** — QC metadata
 - **spine_qc_tag_store.py** — Manual QC ignore/flag tags (`spine_qc_tags.json`, Timepoint-mode)
 - **ignored_spine_store.py**, **oof_segment_store.py** — Out-of-frame & ignore flags

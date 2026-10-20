@@ -1,6 +1,6 @@
 # Rules review — October 2026
 
-Decisions taken one by one with the user; implement together after the review.
+Decisions taken one by one with the user (2026-10-20). **Implemented** on branch `cleanup/single-version`: dcf7590 (1, 3), f9dc783 (6, 7), 8a3a0ed (19, 20, 9, 10, 11, 14, 22, 23), 6fb3126 (12, 13, 24), ed44c3e (29, 29b, 26-28, 30-32, 35), 15f72d1 (4). Output vocabulary (censored, lineage_ignore, right_censored, artifact_mode, events/lifecycle) is left for the outputs review.
 
 ## Decisions
 

@@ -170,7 +170,6 @@ dendrite_links.json,timepoint_names,metadata,,Project timepoint order
 dendrite_link_progress.json,visited_link_ids,metadata,,Links visited in dendrite linker
 oof_segments.json,segment_id,per segment,,OOF segment ID
 oof_segments.json,per_tp,per segment,,Shape per timepoint
-timepoint_selection.json,(selected TPs),metadata,,Active timepoints for FOV
 _removed_columns,disappeared_at_tp,removed,,Removed; use last_seen_tp and event_* (lost_at_*) in spine_registry_derived.csv
 _removed_columns,termination_tp,removed,,Removed; use event_* (lost_at_*) in spine_registry_derived.csv
 _removed_columns,active_timepoints (from spine_registry_wide.csv),moved,,Moved to spine_registry_derived.csv (derived classification not observation)
