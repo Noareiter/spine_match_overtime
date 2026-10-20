@@ -573,6 +573,10 @@ def load_from_animal(fov: int = 1, timepoints: str = "") -> StateResponse:
         elif paths["wide"].is_file():
             _STATE.links = dendrite_link_store.wide_csv_to_links(paths["wide"])
             _STATE.link_counter = max(len(_STATE.links), _STATE.link_counter)
+        else:
+            # A FOV without saved links starts empty. Keeping the previous FOV's
+            # links here is how every GP04 FOV file ended up holding all 20.
+            _STATE.links = []
         _sync_spine_catalog(respan, fov, animal_id=cfg.animal_id)
         return _state_response(fov=fov)
     except HTTPException:
