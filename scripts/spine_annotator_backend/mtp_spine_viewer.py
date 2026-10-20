@@ -1284,12 +1284,7 @@ def _oof_overlays_for_panel(tp: str, bounds: dict, width: int, height: int) -> L
         return float((sx - x0) / w * width), float((sy - y0) / h * height)
 
     for seg in _STATE.oof_segments:
-        pre_tp = str(seg.get("pre_tp", ""))
-        per_tp = seg.get("per_tp") or {}
-        raw = per_tp.get(tp)
-        if raw is None and tp == pre_tp:
-            raw = seg.get("pre_shape") or seg.get("pre_bounds")
-        sh = oof_segment_store.normalize_shape(raw)
+        sh = oof_segment_store.segment_shape_at_timepoint(seg, tp)
         if not sh:
             continue
         bb = oof_segment_store.shape_bounds(sh)
@@ -1951,7 +1946,7 @@ class OofTpBoundsRequest(BaseModel):
     y1: Optional[float] = None
     points: Optional[List[List[float]]] = None
     action: str = "update"
-    propagate_shift: bool = False   # if True, apply same delta to all other TPs
+    propagate_shift: bool = False   # ignored: OOF is single-timepoint (rules review 12)
 
 
 class FocusRequest(BaseModel):
@@ -3639,40 +3634,25 @@ def upsert_oof_segment(req: OofSegmentRequest) -> dict:
         else:
             src_shape = oof_segment_store.rect_shape(req.x0, req.y0, req.x1, req.y1)
 
-        did = _active_pre_dendrite_id()
-        pre_tp = _STATE.t1_timepoint
-        apply_tps = list(req.apply_timepoints or [tp])
-        valid = set(_STATE.timepoint_names)
-        apply_tps = [t for t in apply_tps if t in valid]
-        if not apply_tps:
-            apply_tps = [tp]
-        shifts = _STATE.local_shifts or {}
-
-        pre_shape = oof_segment_store.shape_between_timepoints(
-            src_shape, tp, pre_tp, pre_tp=pre_tp, shifts=shifts
-        )
-        per_tp: Dict[str, dict] = {}
-        ignored_add: Dict[str, List[str]] = {}
-        for dst in apply_tps:
-            dst_shape = oof_segment_store.shape_between_timepoints(
-                src_shape, tp, dst, pre_tp=pre_tp, shifts=shifts
+        # OOF applies only to the timepoint it was drawn on (rules review 12):
+        # no projection to other timepoints, apply_timepoints is ignored.
+        if tp not in _STATE.timepoint_names:
+            raise ValueError(f"Timepoint '{tp}' not active.")
+        ignored_add: Dict[str, List[str]] = {
+            tp: oof_segment_store.spines_inside_shape(
+                src_shape, tp, _STATE.spine_lookup.get(tp) or {}
             )
-            if dst != pre_tp:
-                per_tp[dst] = dst_shape
-            lookup = _STATE.spine_lookup.get(dst) or {}
-            ignored_add[dst] = oof_segment_store.spines_inside_shape(
-                dst_shape, dst, lookup
-            )
-
+        }
         entry = oof_segment_store.upsert_segment(
             respan,
             _STATE.fov,
             animal_id=_STATE.animal_id,
             segment_id=req.segment_id,
-            dendrite_id_pre=did,
-            pre_tp=pre_tp,
-            pre_shape=pre_shape,
-            per_tp=per_tp,
+            dendrite_id_pre=_active_pre_dendrite_id(),
+            pre_tp=tp,
+            pre_shape=src_shape,
+            per_tp={tp: src_shape},
+            drawn_tp=tp,
         )
         _STATE.oof_segments = oof_segment_store.load_segments(respan, _STATE.fov)
         _STATE.ignored_by_tp = ignored_spine_store.add_ignored(
@@ -3720,12 +3700,6 @@ def update_oof_tp(req: OofTpBoundsRequest) -> dict:
                     float(req.x1 or 0),
                     float(req.y1 or 0),
                 )
-            # Find old shape to compute delta for propagation
-            segs_before = oof_segment_store.load_segments(respan, _STATE.fov)
-            old_seg = next(
-                (s for s in segs_before if str(s.get("segment_id","")) == req.segment_id),
-                None,
-            )
             seg = oof_segment_store.update_tp_shape(
                 respan,
                 _STATE.fov,
@@ -3734,32 +3708,6 @@ def update_oof_tp(req: OofTpBoundsRequest) -> dict:
                 tp=req.timepoint,
                 shape=shape,
             )
-            # Propagate move delta to other TPs
-            if req.propagate_shift and seg and old_seg and shape["shape"] == "rect":
-                old_sh = oof_segment_store.segment_shape_at_timepoint(old_seg, req.timepoint)
-                if old_sh and old_sh["shape"] == "rect":
-                    dx = shape["x0"] - old_sh["x0"]
-                    dy = shape["y0"] - old_sh["y0"]
-                    per_tp = seg.get("per_tp") or {}
-                    pre_tp_name = str(seg.get("pre_tp", ""))
-                    all_tps = list(_STATE.timepoint_names)
-                    for other_tp in all_tps:
-                        if other_tp == req.timepoint:
-                            continue
-                        other_sh = oof_segment_store.segment_shape_at_timepoint(seg, other_tp)
-                        if other_sh:
-                            moved = oof_segment_store.translate_shape_by(other_sh, dx, dy)
-                            oof_segment_store.update_tp_shape(
-                                respan, _STATE.fov,
-                                animal_id=_STATE.animal_id,
-                                segment_id=req.segment_id,
-                                tp=other_tp,
-                                shape=moved,
-                            )
-                    seg = oof_segment_store.load_segments(respan, _STATE.fov)
-                    seg = next(
-                        (s for s in seg if str(s.get("segment_id","")) == req.segment_id), None
-                    )
         if not seg:
             raise HTTPException(status_code=404, detail="OOF segment not found.")
         _STATE.oof_segments = oof_segment_store.load_segments(respan, _STATE.fov)

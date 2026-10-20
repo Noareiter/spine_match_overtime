@@ -106,9 +106,6 @@
   <button id="crossBtn" onclick="toggleCrossMode()" style="display:none">Cross-dendrite review</button>
   <button id="oofBtn" onclick="toggleOofMode()">Mark OOF segment</button>
   <button id="oofRemoveBtn" onclick="openOofRemoveModal()">Remove OOF segment</button>
-  <label id="oofPropLabel" style="display:none;font-size:11px;gap:4px;align-items:center">
-    <input type="checkbox" id="oofPropCheck" onchange="S.oofPropagateShift=this.checked"/> move all TPs together
-  </label>
   <span id="oofHint" style="display:none;font-size:11px;color:#c2410c">Draw on zoom or FOV · Shift=box · drag region=move · corners=resize · Alt+drag=pan</span>
   <button id="addSpineBtn" onclick="toggleAddSpineMode()">Force add spine</button>
   <button id="clearAllBtn" onclick="clearAllTps()" title="Clear match on every timepoint (no fate) · Tab">Clear all</button>
@@ -152,11 +149,9 @@
 <div class="oof-modal-backdrop" id="oofModalBackdrop">
   <div class="oof-modal" onclick="event.stopPropagation()">
     <h3>Apply OOF region</h3>
-    <p id="oofModalHint">Choose timepoints. Spines inside the shape are ignored (hidden from matching queue).</p>
+    <p id="oofModalHint">Spines inside the shape are ignored (hidden from matching queue) at this timepoint only.</p>
     <div class="oof-tp-list" id="oofTpList"></div>
     <div class="oof-modal-actions">
-      <button type="button" onclick="oofSelectAllTps(true)">All timepoints</button>
-      <button type="button" onclick="oofSelectAllTps(false)">Clear</button>
       <button type="button" class="primary" onclick="confirmOofApply()">Apply</button>
       <button type="button" onclick="cancelOofModal()">Cancel</button>
     </div>
@@ -913,7 +908,6 @@ async function saveOofEdit() {
   };
   if (sh.shape === 'polygon') body.points = sh.points;
   else { body.x0 = sh.x0; body.y0 = sh.y0; body.x1 = sh.x1; body.y1 = sh.y1; }
-  if (S.oofPropagateShift && ed.action === 'move') body.propagate_shift = true;
   try {
     const res = await api('/mtp/viewer/oof-segment-tp', {
       method: 'POST',
@@ -1045,7 +1039,6 @@ function buildColumns() {
 function updateOofZoomUi() {
   const on = S.oofMode;
   document.getElementById('oofHint').style.display = on ? 'inline' : 'none';
-  document.getElementById('oofPropLabel').style.display = on ? 'flex' : 'none';
 }
 
 function fovSpanMax(tp) {
@@ -1315,21 +1308,12 @@ async function finishOofFreehand(st) {
   openOofModal(st.tp);
 }
 function openOofModal(srcTp) {
-  const list = document.getElementById('oofTpList');
-  list.innerHTML = '';
-  (S.timepoints || []).forEach(tp => {
-    const id = 'oof_tp_'+esc(tp);
-    const checked = tp === srcTp ? ' checked' : '';
-    list.innerHTML += `<label><input type="checkbox" id="${id}" value="${tp.replace(/"/g,'')}"${checked}/> ${tp}${tp===srcTp?' (drawn here)':''}</label>`;
-  });
+  document.getElementById('oofTpList').innerHTML = '';
   document.getElementById('oofModalHint').textContent =
-    `Drawn on ${srcTp}. Spines inside the shape will be ignored. Select timepoints to apply (registration-adjusted).`;
+    `Drawn on ${srcTp}. Spines inside the shape will be ignored at ${srcTp} only. To mark another timepoint, draw there.`;
   document.getElementById('oofModalBackdrop').classList.add('open');
 }
 
-function oofSelectAllTps(on) {
-  document.querySelectorAll('#oofTpList input[type=checkbox]').forEach(cb => { cb.checked = on; });
-}
 
 function cancelOofModal() {
   S.pendingOof = null;
@@ -1337,7 +1321,8 @@ function cancelOofModal() {
 }
 
 function oofSelectedTimepoints() {
-  return Array.from(document.querySelectorAll('#oofTpList input[type=checkbox]:checked')).map(cb => cb.value);
+  // OOF applies only to the timepoint it was drawn on (rules review 12).
+  return S.pendingOof ? [S.pendingOof.timepoint] : [];
 }
 
 async function confirmOofApply() {
