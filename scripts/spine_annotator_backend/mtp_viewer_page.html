@@ -2158,6 +2158,7 @@ async function clearTp(tp, row) {
       body: JSON.stringify(body)
     });
     applyPositionsResponse(res);
+    if (res.message) document.getElementById('status').textContent = res.message;
     updateHeaders(); updateFateBars();
     await refreshAll();
   } catch(err) { document.getElementById('status').textContent = String(err.message||err); }

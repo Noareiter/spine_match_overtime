@@ -1244,6 +1244,25 @@ def _is_unavailable_for_matching(
     return _is_spine_ignored(tp, spine_id) or _is_qc_tagged(tp, spine_id, tagged)
 
 
+def _drop_unavailable_from_open_panels() -> None:
+    """After a new OOF / ignore, the open lineage must not keep a spine that is
+    no longer in the pool: clear it (keep the coordinate focus)."""
+    for attr in ("positions", "positions_b"):
+        pos_map = getattr(_STATE, attr, None) or {}
+        changed = False
+        for tp, pos in list(pos_map.items()):
+            sid = str((pos or {}).get("spine_id") or "")
+            if sid and _is_unavailable_for_matching(tp, sid):
+                pos = dict(pos)
+                pos["spine_id"] = None
+                pos["fate"] = None
+                pos["source"] = "oof_region"
+                pos_map[tp] = pos
+                changed = True
+        if changed:
+            setattr(_STATE, attr, _apply_fate_rules(pos_map))
+
+
 def _is_spine_ignored(tp: str, spine_id: str) -> bool:
     sid = str(spine_id or "").strip()
     if _STATE.catalog and spine_catalog_store.is_global_id(sid):
@@ -3197,6 +3216,16 @@ def confirm_lineage() -> dict:
         respan = _respan_path()
         anchor_tp = _current_anchor_timepoint()
         per_tp = _save_positions_snapshot()
+        unavailable = [
+            f"{tp} ({td.get('spine_id')})"
+            for tp, td in per_tp.items()
+            if td.get("spine_id") and _is_unavailable_for_matching(tp, str(td.get("spine_id")))
+        ]
+        if unavailable:
+            raise ValueError(
+                "Cannot save: spine(s) inside an OOF region, A/I-tagged, or on an "
+                "ignored dendrite: " + ", ".join(unavailable) + ". Clear them first."
+            )
         _annotate_score_app(per_tp)
         if _is_unreviewed_phase():
             tp, anchor_global = spine_qc_store.parse_queue_id(_STATE.active_t1_spine_id)
@@ -3631,6 +3660,7 @@ def upsert_oof_segment(req: OofSegmentRequest) -> dict:
             animal_id=_STATE.animal_id,
             by_tp_add=ignored_add,
         )
+        _drop_unavailable_from_open_panels()
         _build_phase_queues(respan)
         _rebuild_spine_id_list()
         _ensure_nonempty_phase(respan)
@@ -3682,6 +3712,7 @@ def update_oof_tp(req: OofTpBoundsRequest) -> dict:
             raise HTTPException(status_code=404, detail="OOF segment not found.")
         _STATE.oof_segments = oof_segment_store.load_segments(respan, _STATE.fov)
         _sync_ignored_from_oof(respan)
+        _drop_unavailable_from_open_panels()
         _build_phase_queues(respan)
         _rebuild_spine_id_list()
         _ensure_nonempty_phase(respan)

@@ -81,5 +81,20 @@ class TestClearTail(unittest.TestCase):
         self.assertTrue(pos["end-droplet"]["spine_id"])
 
 
+    def test_oof_on_open_panel_spine_clears_it_and_save_refuses_it(self):
+        pos = self._start()
+        mid = pos["mid-droplet"]
+        r = self.client.post("/mtp/viewer/oof-segment", json={
+            "timepoint": "mid-droplet", "shape": "rect",
+            "x0": mid["x"] - 5, "y0": mid["y"] - 5, "x1": mid["x"] + 5, "y1": mid["y"] + 5,
+        })
+        self.assertEqual(r.status_code, 200, r.text)
+        state = self.client.get("/mtp/viewer/state").json()
+        self.assertIsNone(state["positions"]["mid-droplet"]["spine_id"])
+        # Even if the client puts it back, Save refuses an unavailable spine.
+        r = self.client.post("/mtp/viewer/set-spine", json={"timepoint": "mid-droplet", "spine_id": mid["spine_id"]})
+        self.assertEqual(r.status_code, 400)
+
+
 if __name__ == "__main__":
     unittest.main()
