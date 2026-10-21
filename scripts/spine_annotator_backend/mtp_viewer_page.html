@@ -1576,6 +1576,7 @@ async function clickPanel(tp, cv, e, row) {
       body: JSON.stringify(body)
     });
     applyPositionsResponse(res);
+    if (res.message) document.getElementById('status').textContent = res.message;  // e.g. claimed-spine warning
     const pmap = row === 'b' ? S.positionsB : S.positions;
     const p = pmap[tp];
     if (p && p.x != null) {
