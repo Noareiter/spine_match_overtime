@@ -19,6 +19,7 @@ Decisions taken one by one with the user (2026-10-20). **Implemented** on branch
 | 29c | A/I tag in Timepoint mode on a spine a saved lineage claims | Keep as today: the **whole lineage is deleted**, all its spines return to the pool, rebuild it from scratch. |
 | 29b | Tab→I (ignore every TP from Lineage mode) | Remove. IGNORE only in Timepoint mode, one detection at one timepoint (makes bug 34 moot). Supersedes the 2026-08-20 decision to keep it. |
 | 35b | Clear in Lineage mode | Clear at a timepoint after the first match clears that timepoint and every later one (spine disappeared → LOST on save). Before the first match it clears only that timepoint. Timepoint mode: anchor only. (b5e596e) |
+| 29d | Claimed / excluded detections and clicks | Any detection can be picked by hand (label click or image click): claimed by another lineage (red) → duplicate to resolve later; excluded by A/I tag, OOF or ignored dendrite (blue) → the exclusion is lifted on save (A/I tag cleared; disposition = lineage_*; dropped from excluded_spines.csv). Excluded detections are never queued, so review completes without them. Suggestions still skip both. (2026-10-21) |
 | 6 | Phase 0 auto-link by identical dendrite id | Remove the auto-link button/endpoint. RESPAN dendrite numbering is not consistent across timepoints; linking is manual only. |
 
 ## Bugs to fix (no decision needed)

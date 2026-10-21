@@ -654,13 +654,17 @@ function drawMarkers(ctx, markers, currentZ) {
       ctx.beginPath(); ctx.arc(x, y, 6, 0, Math.PI*2); ctx.stroke();
       ctx.fillStyle = '#f97316'; ctx.fillText('?', x, y - 9);
     } else {
+      // red = held by a lineage; blue = excluded (A/I tag, OOF, ignored
+      // dendrite) - still selectable, never queued; white = free.
       const assigned = !!m.assigned;
-      ctx.fillStyle = assigned ? '#dc2626' : 'rgba(255,255,255,0.92)';
-      ctx.strokeStyle = assigned ? 'rgba(220,38,38,0.55)' : 'rgba(0,0,0,0.5)'; ctx.lineWidth = 1;
+      const excluded = !!m.excluded && !assigned;
+      const color = assigned ? '#dc2626' : excluded ? '#3b82f6' : 'rgba(255,255,255,0.92)';
+      ctx.fillStyle = color;
+      ctx.strokeStyle = assigned ? 'rgba(220,38,38,0.55)' : excluded ? 'rgba(59,130,246,0.55)' : 'rgba(0,0,0,0.5)'; ctx.lineWidth = 1;
       const t = String(m.label);
       ctx.strokeText(t, x, y - 6); ctx.fillText(t, x, y - 6);
       ctx.beginPath(); ctx.arc(x, y, 2.5, 0, Math.PI*2);
-      ctx.fillStyle = assigned ? '#dc2626' : '#fff'; ctx.fill(); ctx.stroke();
+      ctx.fillStyle = assigned ? '#dc2626' : excluded ? '#3b82f6' : '#fff'; ctx.fill(); ctx.stroke();
     }
   }
 }

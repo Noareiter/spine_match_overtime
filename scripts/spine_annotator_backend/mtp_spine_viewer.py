@@ -663,17 +663,18 @@ def _markers_for_panel_positions(
     markers: List[dict] = []
     lookup = _STATE.spine_lookup.get(tp) or {}
     assigned_ids = _all_assigned_spine_ids_at_tp(tp)
+    tagged = _qc_tagged_at_tp(tp)
     for sid, rec in lookup.items():
         sid_str = str(sid)
         if manual_spine_store.is_manual_id(sid_str) and sid_str != focus_id:
             continue
-        # The focused spine is always drawn, so the user sees what the
-        # lineage holds even inside an OOF region or on an ignored dendrite.
-        if sid_str != focus_id:
-            if _is_spine_ignored(tp, sid):
-                continue
-            if not _filter_oof_spine(rec, tp):
-                continue
+        # Excluded detections (A/I tag, OOF, ignored dendrite) are drawn too
+        # (blue on the page): never queued, but selectable on purpose.
+        excluded = sid_str != focus_id and (
+            sid_str in tagged
+            or _is_spine_ignored(tp, sid)
+            or not _filter_oof_spine(rec, tp)
+        )
         x, y = float(rec["x"]), float(rec["y"])
         if not (x0 <= x < x1 and y0 <= y < y1):
             continue
@@ -694,6 +695,7 @@ def _markers_for_panel_positions(
                     else ("manual" if str(sid).startswith("manual_") else "csv")
                 ),
                 "assigned": sid_str in assigned_ids and not is_focus,
+                "excluded": bool(excluded),
             }
         )
     if focus_pos and not focus_id:
@@ -1504,8 +1506,8 @@ def _nearest_spine(
         did = str(rec.get("dendrite_id") or "")
         if dendrite_ids and did not in dendrite_ids:
             continue
-        if not _filter_oof_spine(rec, tp, dendrite_id=did):
-            continue
+        # OOF spines are not skipped: a deliberate click may pick one
+        # (excluded detections stay selectable, 2026-10-21).
         if max_dz is not None and abs(float(rec["z"]) - z) > max_dz:
             continue
         d = float(
@@ -1525,28 +1527,52 @@ def _nearest_spine(
 
 
 def _snap_exclusions(tp: str) -> set[str]:
-    """Spines a click-snap must skip: OOF / ignored, A/I-tagged, or on an
-    ignored dendrite. A spine claimed by another lineage is NOT skipped: the
-    user may pick it on purpose (to verify, or to raise a duplicate), exactly
-    as set-spine allows, and gets the same warning."""
-    ignored = set(_STATE.ignored_by_tp.get(tp, set()))
-    tagged = _qc_tagged_at_tp(tp)
-    dendrite_ignored = ignored_dendrite_store.spine_ids_on_ignored_dendrites(
-        _STATE.ignored_dendrites_by_tp, tp, _STATE.spine_lookup.get(tp) or {}
-    )
-    return (ignored | tagged | dendrite_ignored) - _current_lineage_spine_ids()
+    """A click-snap skips nothing: a spine claimed by another lineage or an
+    excluded one (A/I tag, OOF, ignored dendrite) may be picked on purpose,
+    exactly as set-spine allows, and gets the same warning (2026-10-21)."""
+    return set()
+
+
+def _excluded_reason(tp: str, sid: str) -> str:
+    """Why sid at tp is excluded from the matching work ('' if it is not)."""
+    if not sid or manual_spine_store.is_manual_id(sid):
+        return ""
+    tags = spine_qc_tag_store.load_tags(_respan_path(), _STATE.fov) if _STATE.respan_root else {}
+    tag = spine_qc_tag_store.get_tag(tags, tp, sid)
+    if not tag and _STATE.catalog and spine_catalog_store.is_global_id(sid):
+        tag = spine_qc_tag_store.get_tag(tags, tp, _STATE.catalog.to_local(tp, sid) or "")
+    if tag == "artifact":
+        return "tagged ARTIFACT"
+    if tag == "ignore":
+        return "tagged IGNORE"
+    rec = (_STATE.spine_lookup.get(tp) or {}).get(sid) or {}
+    if ignored_spine_store.is_ignored(_STATE.ignored_by_tp, tp, sid) or (
+        rec and not _filter_oof_spine(rec, tp)
+    ):
+        return "inside an OOF region"
+    did = str(rec.get("dendrite_id") or "")
+    if did and ignored_dendrite_store.is_dendrite_ignored(_STATE.ignored_dendrites_by_tp, tp, did):
+        return "on an ignored dendrite"
+    return ""
 
 
 def _claimed_warning(tp: str, sid: str) -> str:
-    """Warning text when sid at tp already belongs to another lineage."""
+    """Warning text when sid at tp already belongs to another lineage or was
+    excluded; '' when it is a free spine."""
     if not sid or sid in _current_lineage_spine_ids():
         return ""
-    if sid not in _claimed_for_matching(tp):
-        return ""
-    return (
-        f"Spine '{sid}' at '{tp}' is already claimed by another lineage — "
-        f"this creates a conflict to resolve later (export is blocked until then)."
-    )
+    if sid in _claimed_for_matching(tp):
+        return (
+            f"Spine '{sid}' at '{tp}' is already claimed by another lineage — "
+            f"this creates a conflict to resolve later (export is blocked until then)."
+        )
+    why = _excluded_reason(tp, sid)
+    if why:
+        return (
+            f"Spine '{sid}' at '{tp}' was excluded ({why}) — selecting it puts it "
+            f"back into this lineage; the exclusion is lifted when you save."
+        )
+    return ""
 
 
 def _estimate_shift_at(
@@ -2784,12 +2810,6 @@ def set_spine(req: SetSpineRequest) -> SelectSpineResponse:
         lookup = _STATE.spine_lookup.get(tp) or {}
         if sid not in lookup:
             raise ValueError(f"Spine '{sid}' not found at '{tp}'.")
-        if _is_unavailable_for_matching(tp, sid):
-            raise ValueError(
-                f"Spine '{sid}' at '{tp}' is ignored (OOF region, QC tag, or an "
-                f"ignored dendrite) and cannot be matched. Un-ignore it first if "
-                f"this was a mistake."
-            )
         # A spine already claimed by another lineage is allowed here -- the
         # "one spine, one lineage" invariant is enforced at export, not at
         # click time (see find_duplicate_conflicts / apply_conflict_resolution).
@@ -3212,16 +3232,6 @@ def confirm_lineage() -> dict:
         respan = _respan_path()
         anchor_tp = _current_anchor_timepoint()
         per_tp = _save_positions_snapshot()
-        unavailable = [
-            f"{tp} ({td.get('spine_id')})"
-            for tp, td in per_tp.items()
-            if td.get("spine_id") and _is_unavailable_for_matching(tp, str(td.get("spine_id")))
-        ]
-        if unavailable:
-            raise ValueError(
-                "Cannot save: spine(s) inside an OOF region, A/I-tagged, or on an "
-                "ignored dendrite: " + ", ".join(unavailable) + ". Clear them first."
-            )
         _annotate_score_app(per_tp)
         if _is_unreviewed_phase():
             tp, anchor_global = spine_qc_store.parse_queue_id(_STATE.active_t1_spine_id)
@@ -3243,6 +3253,7 @@ def confirm_lineage() -> dict:
             "phase_index": int(prior_progress.get("phase_index", 0) or 0),
             "anchor_timepoint": str(prior_progress.get("anchor_timepoint") or ""),
             "prior_entry": copy.deepcopy(prior_entry) if prior_entry else None,
+            "cleared_tags": _lift_qc_tags(respan, per_tp),
         }
         save_info = spine_lineage_store.save_decision(
             respan,
@@ -3394,6 +3405,24 @@ def commit_timepoint_fate(req: CommitTimepointFateRequest) -> dict:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+def _lift_qc_tags(respan: Path, per_tp: Dict[str, dict]) -> List[dict]:
+    """Picking an A/I-tagged detection into a lineage supersedes the tag:
+    clear it on save. Returns what was cleared, for undo."""
+    tags = spine_qc_tag_store.load_tags(respan, _STATE.fov)
+    cleared: List[dict] = []
+    for tp, td in per_tp.items():
+        sid = str(td.get("spine_id") or "").strip()
+        if not sid:
+            continue
+        tag = spine_qc_tag_store.get_tag(tags, tp, sid)
+        if tag:
+            cleared.append({"timepoint": tp, "spine_id": sid, "tag": tag})
+            spine_qc_tag_store.clear_tag(
+                respan, _STATE.fov, timepoint=tp, spine_id=sid, animal_id=_STATE.animal_id
+            )
+    return cleared
+
+
 @router.post("/undo-last-decision", response_model=UndoLastDecisionResponse)
 def undo_last_decision() -> UndoLastDecisionResponse:
     """Reverse the single most recent confirm-lineage save: restores the
@@ -3410,6 +3439,12 @@ def undo_last_decision() -> UndoLastDecisionResponse:
         if stash.get("kind") == "timepoint_fate":
             result = _undo_timepoint_fate(respan, stash)
         else:
+            for item in stash.get("cleared_tags") or []:
+                spine_qc_tag_store.save_tag(
+                    respan, _STATE.fov, timepoint=str(item["timepoint"]),
+                    spine_id=str(item["spine_id"]), tag=str(item["tag"]),
+                    animal_id=_STATE.animal_id,
+                )
             result = spine_lineage_store.apply_undo_snapshot(
                 respan,
                 _STATE.fov,

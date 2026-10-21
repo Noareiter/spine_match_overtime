@@ -348,18 +348,10 @@ def build_disposition_rows(
             disposition = DISPOSITION_DUPLICATE
             conflict = "yes"
             duplicate_unresolved += 1
-        elif gid in (ignored_by_tp.get(tp) or set()):
-            disposition = DISPOSITION_POOL_IGNORE
-            reviewed = "yes"
-        elif str((qc_tags.get(tp) or {}).get(gid) or "") == "ignore":
-            disposition = DISPOSITION_QC_IGNORE
-            reviewed = "yes"
-        elif str((qc_tags.get(tp) or {}).get(gid) or "") == "artifact":
-            disposition = DISPOSITION_QC_ARTIFACT
-            reviewed = "yes"
-        elif str(dendrite_by_gid_tp.get(f"{tp}|{gid}") or "") in (ignored_dendrites_by_tp.get(tp) or set()):
-            disposition = DISPOSITION_DENDRITE_IGNORE
-            reviewed = "yes"
+        # A detection a lineage holds is that lineage's, even if it is also
+        # inside an OOF region, A/I-tagged or on an ignored dendrite: picking
+        # it into a lineage was an explicit decision that supersedes the
+        # exclusion (2026-10-21).
         elif keys:
             primary = keys[0]
             if cid in resolutions:
@@ -387,6 +379,18 @@ def build_disposition_rows(
                         disposition = mapped
                         lineage_key = gid
                         reviewed = "yes"
+        elif gid in (ignored_by_tp.get(tp) or set()):
+            disposition = DISPOSITION_POOL_IGNORE
+            reviewed = "yes"
+        elif str((qc_tags.get(tp) or {}).get(gid) or "") == "ignore":
+            disposition = DISPOSITION_QC_IGNORE
+            reviewed = "yes"
+        elif str((qc_tags.get(tp) or {}).get(gid) or "") == "artifact":
+            disposition = DISPOSITION_QC_ARTIFACT
+            reviewed = "yes"
+        elif str(dendrite_by_gid_tp.get(f"{tp}|{gid}") or "") in (ignored_dendrites_by_tp.get(tp) or set()):
+            disposition = DISPOSITION_DENDRITE_IGNORE
+            reviewed = "yes"
         elif gid in anchor_keys.get(tp, set()):
             lin = spine_lineage_store.get_lineage_by_key(respan, fov, gid)
             if lin:

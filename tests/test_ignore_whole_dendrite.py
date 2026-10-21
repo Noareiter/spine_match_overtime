@@ -124,8 +124,8 @@ class TestIgnoreWholeDendrite(unittest.TestCase):
         )
         self.assertEqual(suggested_local, "20")
 
-        # Manual override of an ignored spine must be hard-blocked, not just
-        # skipped by ranking.
+        # Ranking skips an ignored spine, but picking it by hand is allowed
+        # (explicit choice, 2026-10-21) and carries a warning.
         gid_15 = next(
             row["global_spine_id"]
             for row in rows
@@ -134,8 +134,8 @@ class TestIgnoreWholeDendrite(unittest.TestCase):
         r = self.client.post(
             "/mtp/viewer/set-spine", json={"timepoint": "end-droplet", "spine_id": gid_15}
         )
-        self.assertEqual(r.status_code, 400)
-        self.assertIn("ignored", r.text.lower())
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertIn("ignored dendrite", (r.json().get("message") or "").lower())
 
         # The merged ignore CSV must list both dendrite-2 spines under source
         # "dendrite".
