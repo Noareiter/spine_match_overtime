@@ -247,9 +247,17 @@ def _excluded_spine_rows_for_fov(respan: Path, fov: int, animal_id: str) -> List
     - dendrite_ignore: on a dendrite ignored in Phase 0 (ignored_dendrites.json),
       resolved live against the catalog
 
-    A detection can appear under more than one reason.
+    A detection can appear under more than one reason. A detection that a
+    lineage holds is not listed: selecting it into a lineage superseded the
+    exclusion.
     """
     catalog = spine_catalog_store.load_catalog(respan, fov)
+    held: Dict[str, set] = {}
+
+    def _is_held(tp: str, gid: str) -> bool:
+        if tp not in held:
+            held[tp] = set(spine_lineage_store.claimed_spine_ids_at_tp(respan, fov, tp))
+        return gid in held[tp]
 
     def _row(tp: str, gid: str, reason: str) -> dict:
         local = ""
@@ -268,12 +276,13 @@ def _excluded_spine_rows_for_fov(respan: Path, fov: int, animal_id: str) -> List
     rows: List[dict] = []
     for tp, tagmap in sorted(spine_qc_tag_store.load_tags(respan, fov).items()):
         for gid, tag in sorted(tagmap.items()):
-            if tag in ("artifact", "ignore") and str(gid).strip():
+            if tag in ("artifact", "ignore") and str(gid).strip() and not _is_held(tp, gid):
                 rows.append(_row(tp, gid, tag))
 
     for tp, ids in sorted(ignored_spine_store.load_ignored(respan, fov).items()):
         for gid in sorted(ids):
-            rows.append(_row(tp, gid, "oof"))
+            if not _is_held(tp, gid):
+                rows.append(_row(tp, gid, "oof"))
 
     by_tp_dendrite = ignored_dendrite_store.load_ignored_dendrites(respan, fov)
     for tp, dendrite_ids in sorted(by_tp_dendrite.items()):
@@ -283,7 +292,8 @@ def _excluded_spine_rows_for_fov(respan: Path, fov: int, animal_id: str) -> List
             by_tp_dendrite, tp, catalog.lookup_for_timepoint(tp)
         )
         for gid in sorted(spine_ids):
-            rows.append(_row(tp, gid, "dendrite_ignore"))
+            if not _is_held(tp, gid):
+                rows.append(_row(tp, gid, "dendrite_ignore"))
 
     return rows
 

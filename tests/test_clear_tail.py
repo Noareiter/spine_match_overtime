@@ -94,9 +94,10 @@ class TestClearTail(unittest.TestCase):
         self.assertIsNone(state["positions"]["mid-droplet"]["spine_id"])
         # Same as Clear at mid: the later timepoint is cleared too.
         self.assertIsNone(state["positions"]["end-droplet"]["spine_id"])
-        # Even if the client puts it back, Save refuses an unavailable spine.
+        # Putting it back by hand is allowed (explicit choice), with a warning.
         r = self.client.post("/mtp/viewer/set-spine", json={"timepoint": "mid-droplet", "spine_id": mid["spine_id"]})
-        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertIn("excluded", (r.json().get("message") or "").lower())
 
 
 if __name__ == "__main__":
