@@ -130,5 +130,24 @@ class TestClaimedSpineExcludedFromSuggestion(unittest.TestCase):
         self.assertEqual(coverage.get("duplicate_unresolved", 0), 0)
 
 
+    def test_click_on_claimed_spine_selects_it_with_warning(self):
+        # Suggestions skip claimed spines, but a deliberate click (focus snap)
+        # on one must select it - that is how a duplicate is raised on purpose
+        # and how a decision is double-checked.
+        r = self.client.post("/mtp/viewer/load", params={"fov": 1})
+        self.assertEqual(r.status_code, 200)
+        self.client.post("/mtp/viewer/select-spine", json={"t1_spine_id": "S_00001"})
+        r = self.client.post("/mtp/viewer/confirm-lineage", json={})
+        self.assertEqual(r.status_code, 200)
+        self.client.post("/mtp/viewer/select-spine", json={"t1_spine_id": "S_00002"})
+        # Spine 15 at end-droplet (S_00003) is claimed by S_00001's lineage.
+        r = self.client.post("/mtp/viewer/focus", json={
+            "timepoint": "end-droplet", "stack_x": 101.0, "stack_y": 101.0, "z_plane": 5,
+        })
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["positions"]["end-droplet"]["spine_id"], "S_00003")
+        self.assertIn("already claimed", r.json().get("message") or "")
+
+
 if __name__ == "__main__":
     unittest.main()

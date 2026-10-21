@@ -1525,10 +1525,28 @@ def _nearest_spine(
 
 
 def _snap_exclusions(tp: str) -> set[str]:
-    """Spines a click-snap must skip: claimed by another lineage, OOF / ignored,
-    A/I-tagged, or on an ignored dendrite. The active lineage's own spines stay."""
-    out = set(_claimed_spine_ids_by_tp(exclude_lineage_key=_resolve_lineage_key_for_active()).get(tp, set()))
-    return out - _current_lineage_spine_ids()
+    """Spines a click-snap must skip: OOF / ignored, A/I-tagged, or on an
+    ignored dendrite. A spine claimed by another lineage is NOT skipped: the
+    user may pick it on purpose (to verify, or to raise a duplicate), exactly
+    as set-spine allows, and gets the same warning."""
+    ignored = set(_STATE.ignored_by_tp.get(tp, set()))
+    tagged = _qc_tagged_at_tp(tp)
+    dendrite_ignored = ignored_dendrite_store.spine_ids_on_ignored_dendrites(
+        _STATE.ignored_dendrites_by_tp, tp, _STATE.spine_lookup.get(tp) or {}
+    )
+    return (ignored | tagged | dendrite_ignored) - _current_lineage_spine_ids()
+
+
+def _claimed_warning(tp: str, sid: str) -> str:
+    """Warning text when sid at tp already belongs to another lineage."""
+    if not sid or sid in _current_lineage_spine_ids():
+        return ""
+    if sid not in _claimed_for_matching(tp):
+        return ""
+    return (
+        f"Spine '{sid}' at '{tp}' is already claimed by another lineage — "
+        f"this creates a conflict to resolve later (export is blocked until then)."
+    )
 
 
 def _estimate_shift_at(
@@ -2622,7 +2640,9 @@ def update_focus(req: FocusRequest) -> SelectSpineResponse:
             lookup, pos["x"], pos["y"], pos["z"], tp=tp,
             exclude=_snap_exclusions(tp), max_dz=baseline_adapter.MAX_MATCH_Z_GAP,
         )
+        warning = ""
         if near:
+            warning = _claimed_warning(tp, str(near["spine_id"]))
             pos.update(near)
             pos["source"] = "click_nearest"
             pos["fate"] = None
@@ -2634,6 +2654,7 @@ def update_focus(req: FocusRequest) -> SelectSpineResponse:
         updated = _apply_fate_rules(pos_map)
         _set_active_positions(updated)
         return _select_spine_response(
+            message=warning,
             local_registration=bool(_STATE.local_shifts) and any(
                 any(v != 0.0 for v in s) for s in _STATE.local_shifts.values()
             ),
@@ -2774,13 +2795,7 @@ def set_spine(req: SetSpineRequest) -> SelectSpineResponse:
         # click time (see find_duplicate_conflicts / apply_conflict_resolution).
         # The claim just becomes a conflict the user resolves later, with both
         # complete lineages in front of her instead of a forced snap decision.
-        claimed = _claimed_for_matching(tp)
-        warning = (
-            f"Spine '{sid}' at '{tp}' is already claimed by another lineage — "
-            f"this creates a conflict to resolve later (export is blocked until then)."
-            if sid in claimed and sid not in _current_lineage_spine_ids()
-            else ""
-        )
+        warning = _claimed_warning(tp, sid)
         rec = lookup[sid]
         pos_map = _active_positions()
         pos_map[tp] = {
