@@ -120,40 +120,6 @@ def _float_or_none(val) -> Optional[float]:
         return None
 
 
-def _check_contiguity_would_violate(pos_map: Dict[str, dict], timepoint_names: List[str]) -> Optional[str]:
-    """Check if current positions would violate contiguity if saved.
-
-    Returns error message if gap would be created, None if OK.
-    """
-    if not timepoint_names:
-        return None
-
-    first_match_idx = None
-    last_match_idx = None
-    matched_indices = []
-
-    for i, tp in enumerate(timepoint_names):
-        td = pos_map.get(tp) or {}
-        sid = str(td.get("spine_id") or "").strip()
-        if sid:
-            if first_match_idx is None:
-                first_match_idx = i
-            last_match_idx = i
-            matched_indices.append(i)
-
-    # No matches or single match is always OK
-    if not matched_indices or len(matched_indices) == 1:
-        return None
-
-    # Check for gap
-    for i in range(first_match_idx, last_match_idx + 1):
-        if i not in matched_indices:
-            gap_tp = timepoint_names[i]
-            return f"Would create gap: spine matched at {timepoint_names[first_match_idx]} and {timepoint_names[last_match_idx]}, but not at {gap_tp}. Matched timepoints must be contiguous."
-
-    return None
-
-
 def _find_registry_csv(respan: Path, fov: int) -> Optional[Path]:
     meta = respan / "_annotator" / f"fov{fov}" / "spine_registry_wide.csv"
     if meta.is_file():
@@ -701,10 +667,13 @@ def _markers_for_panel_positions(
         sid_str = str(sid)
         if manual_spine_store.is_manual_id(sid_str) and sid_str != focus_id:
             continue
-        if _is_spine_ignored(tp, sid):
-            continue
-        if not _filter_oof_spine(rec, tp):
-            continue
+        # The focused spine is always drawn, so the user sees what the
+        # lineage holds even inside an OOF region or on an ignored dendrite.
+        if sid_str != focus_id:
+            if _is_spine_ignored(tp, sid):
+                continue
+            if not _filter_oof_spine(rec, tp):
+                continue
         x, y = float(rec["x"]), float(rec["y"])
         if not (x0 <= x < x1 and y0 <= y < y1):
             continue
@@ -1240,7 +1209,13 @@ def _is_qc_tagged(tp: str, spine_id: str, tagged: Optional[set[str]] = None) -> 
 def _is_unavailable_for_matching(
     tp: str, spine_id: str, tagged: Optional[set[str]] = None
 ) -> bool:
-    """Ignored (OOF / ignored dendrite) or A/I-tagged: never part of a lineage."""
+    """Ignored (OOF / ignored dendrite) or A/I-tagged: never part of a lineage.
+
+    A manual (Force-add) spine is the user's explicit decision and is never
+    unavailable.
+    """
+    if manual_spine_store.is_manual_id(spine_id):
+        return False
     return _is_spine_ignored(tp, spine_id) or _is_qc_tagged(tp, spine_id, tagged)
 
 
@@ -1285,6 +1260,8 @@ def _drop_unavailable_from_open_panels() -> None:
 
 def _is_spine_ignored(tp: str, spine_id: str) -> bool:
     sid = str(spine_id or "").strip()
+    if manual_spine_store.is_manual_id(sid):
+        return False
     if _STATE.catalog and spine_catalog_store.is_global_id(sid):
         local = _STATE.catalog.to_local(tp, sid)
         if local and ignored_spine_store.is_ignored(_STATE.ignored_by_tp, tp, local):
@@ -2620,9 +2597,6 @@ def accept_suggestion(req: AcceptSuggestionRequest) -> SelectSpineResponse:
                 "source": "accepted_suggestion",
                 "fate": None,
             }
-        contiguity_error = _check_contiguity_would_violate(pos_map, _STATE.timepoint_names)
-        if contiguity_error:
-            raise ValueError(contiguity_error)
         _set_active_positions(_apply_fate_rules(pos_map))
         return _select_spine_response(message=f"Accepted suggestion at {tp}.")
     except Exception as exc:
@@ -2649,16 +2623,9 @@ def update_focus(req: FocusRequest) -> SelectSpineResponse:
             exclude=_snap_exclusions(tp), max_dz=baseline_adapter.MAX_MATCH_Z_GAP,
         )
         if near:
-            snapped = {**pos, **near, "source": "click_nearest", "fate": None}
-            trial = {**pos_map, tp: snapped}
-            # Focus always moves; a snap that would split the lineage is dropped
-            # (coordinate focus only) and Save explains the gap as everywhere else.
-            if _check_contiguity_would_violate(trial, _STATE.timepoint_names):
-                pos["spine_id"] = None
-                pos["source"] = "click_coord"
-                pos["fate"] = None
-            else:
-                pos = snapped
+            pos.update(near)
+            pos["source"] = "click_nearest"
+            pos["fate"] = None
         else:
             pos["spine_id"] = None
             pos["source"] = "click_coord"
@@ -2747,14 +2714,19 @@ def add_manual_spine_click(req: AddManualSpineRequest) -> SelectSpineResponse:
             (pos_map.get(tp) or {}).get("z", 0)
         )
         pre_tp = _STATE.t1_timepoint
-        did = _active_pre_dendrite_id() if tp != pre_tp else ""
+        x, y = float(req.stack_x), float(req.stack_y)
+        if oof_segment_store.coords_in_oof(x, y, tp, _STATE.oof_segments):
+            raise ValueError(f"'{tp}' is out of frame here — remove the OOF region first.")
+        # Dendrite numbers are per timepoint, so nothing sensible can be
+        # inherited from the pre spine; a manual spine carries none.
+        did = ""
         respan = _respan_path()
         existing = _all_manual_ids_for_tp(tp, respan, _STATE.fov)
         sid = manual_spine_store.make_manual_spine_id(tp, existing)
         rec = manual_spine_store.to_lookup_row(
             spine_id=sid,
-            x=float(req.stack_x),
-            y=float(req.stack_y),
+            x=x,
+            y=y,
             z=z,
             dendrite_id=did,
         )
@@ -2773,9 +2745,6 @@ def add_manual_spine_click(req: AddManualSpineRequest) -> SelectSpineResponse:
         }
         if tp == pre_tp and sid not in _STATE.t1_spine_ids and not _is_duplicate_phase():
             _STATE.t1_spine_ids.append(sid)
-        contiguity_error = _check_contiguity_would_violate(pos_map, _STATE.timepoint_names)
-        if contiguity_error:
-            raise ValueError(contiguity_error)
         updated = _apply_fate_rules(pos_map)
         _set_active_positions(updated)
         return _select_spine_response(
@@ -2823,9 +2792,8 @@ def set_spine(req: SetSpineRequest) -> SelectSpineResponse:
             "source": "manual",
             "fate": None,
         }
-        contiguity_error = _check_contiguity_would_violate(pos_map, _STATE.timepoint_names)
-        if contiguity_error:
-            raise ValueError(contiguity_error)
+        # A gap is allowed while editing; Save refuses a split lineage with
+        # the reason (validate_lineage_shape), so the user fills or clears it.
         _set_active_positions(_apply_fate_rules(pos_map))
         return _select_spine_response(message=warning)
     except Exception as exc:

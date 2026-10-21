@@ -1,9 +1,9 @@
 """
-/focus always moves the panel (rules review bug 14 follow-up).
+/focus always moves the panel, and may snap across a gap.
 
-Clicking an empty area at a timepoint after a gap must still focus there; the
-nearest-spine snap is dropped (it would split the lineage) instead of the
-whole request failing.
+A gap is allowed while editing (2026-10-21): clicking near a spine at a
+timepoint after a gap snaps to it like anywhere else. Only Save refuses the
+split lineage, with the reason.
 
 Run with: python -m unittest tests.test_focus_across_gap -v
 """
@@ -54,7 +54,7 @@ class TestFocusAcrossGap(unittest.TestCase):
             os.environ["SPINE_CONFIG"] = self._prior
         shutil.rmtree(self._root, ignore_errors=True)
 
-    def test_focus_after_gap_moves_without_snapping(self):
+    def test_focus_after_gap_snaps_and_save_refuses_the_split(self):
         r = self.client.post("/mtp/viewer/load", params={"fov": 1})
         self.assertEqual(r.status_code, 200, r.text)
         sid = r.json()["spine_ids"][0]
@@ -66,9 +66,11 @@ class TestFocusAcrossGap(unittest.TestCase):
         })
         self.assertEqual(r.status_code, 200, r.text)
         end = r.json()["positions"]["end-droplet"]
-        self.assertIsNone(end.get("spine_id"))
-        self.assertEqual(end.get("source"), "click_coord")
-        self.assertAlmostEqual(float(end["x"]), 101.0)
+        self.assertTrue(end.get("spine_id"))
+        self.assertEqual(end.get("source"), "click_nearest")
+        r = self.client.post("/mtp/viewer/confirm-lineage", json={})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("cannot be split", r.json()["detail"])
 
 
 if __name__ == "__main__":
