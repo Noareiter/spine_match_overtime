@@ -46,6 +46,10 @@ spine_match_overtime/
 │   │   ├── project_paths.py       # Path constants (PROJECT_ROOT, RESULTS_DIR)
 │   │   ├── __main__.py            # Module launcher
 │   │   └── __init__.py
+├── duplicates/
+│   ├── duplicates_review.py       # Cross-FOV duplicate spine review (start_duplicates.bat); exports
+│   │                              #   _annotator/Analysis/twin_review/spine_registry_wide_deduplicated.csv
+│   └── README.md
 ├── tests/                         # Validation scripts (crop parity, score_app persistence)
 ├── results/                        # App session state (workspace/, per-FOV outputs)
 ├── docs/
